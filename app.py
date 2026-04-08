@@ -30,7 +30,10 @@ if uploaded_file:
                         if '품목 및 등급' in df.columns or '품목' in df.columns: break
                     except: continue
             else:
-                df = pd.read_excel(uploaded_file)
+                if uploaded_file.name.endswith('.xls'):
+                    df = pd.read_excel(uploaded_file, engine='xlrd')
+                else:
+                    df = pd.read_excel(uploaded_file, engine='openpyxl')
                 
             if df is None:
                 st.error("파일을 제대로 읽지 못했습니다.")
