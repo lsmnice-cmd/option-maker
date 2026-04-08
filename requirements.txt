@@ -2,3 +2,4 @@ streamlit
 pandas
 xlwt
 openpyxl
+xlrd
