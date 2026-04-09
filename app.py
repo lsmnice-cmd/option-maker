@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import io
 import xlwt 
+from datetime import datetime  # 💡 시간 저장을 위해 새롭게 추가된 돋보기
 
 st.set_page_config(layout="wide")
 st.title("상품 중량 및 옵션가 자동 생성기 (다중 품목 지원)")
@@ -27,6 +28,7 @@ if uploaded_file:
                 for enc in encodings:
                     try:
                         df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
+                        df.columns = df.columns.str.strip() 
                         if '품목 및 등급' in df.columns or '품목' in df.columns: break
                     except: continue
             else:
@@ -34,6 +36,7 @@ if uploaded_file:
                     df = pd.read_excel(uploaded_file, engine='xlrd')
                 else:
                     df = pd.read_excel(uploaded_file, engine='openpyxl')
+                df.columns = df.columns.str.strip() 
                 
             if df is None:
                 st.error("파일을 제대로 읽지 못했습니다.")
@@ -45,6 +48,10 @@ if uploaded_file:
                 col_name = '품목'
             else:
                 st.error("파일에서 '품목 및 등급' 또는 '품목' 열(A열)을 찾을 수 없습니다.")
+                st.stop()
+                
+            if '중량' not in df.columns:
+                st.error("파일에서 '중량' 열(B열)을 찾을 수 없습니다.")
                 st.stop()
                 
             df['__sort_1'] = range(len(df))
@@ -70,11 +77,11 @@ if st.session_state.processed_data is not None:
     with col_title:
         st.subheader("1. 수정할 품목 선택 및 단가 설정")
     with col_undo:
-        if st.session_state.history:
-            if st.button("⏪ 방금 한 작업 되돌리기 (Undo)"):
-                st.session_state.processed_data = st.session_state.history.pop()
-                st.success("이전 상태로 되돌렸습니다!")
-                st.rerun()
+        can_undo = len(st.session_state.history) > 0
+        if st.button("⏪ 방금 한 작업 되돌리기 (Undo)", disabled=not can_undo):
+            st.session_state.processed_data = st.session_state.history.pop()
+            st.success("이전 상태로 되돌렸습니다!")
+            st.rerun()
     
     unique_items = df[col_item_name].dropna().unique()
     selected_item = st.selectbox(f"A열({col_item_name})에서 수정할 항목을 선택하세요", unique_items)
@@ -102,7 +109,6 @@ if st.session_state.processed_data is not None:
             
         item_rows = df[df[col_item_name] == selected_item].copy()
         
-        # 💡 [2번째 열] 중량 서식 추출
         sample_b = item_rows['중량'].iloc[0] if len(item_rows) > 0 else "0kg"
         num_match = re.search(r'(\d+\.?\d*)', str(sample_b))
         if num_match:
@@ -111,7 +117,6 @@ if st.session_state.processed_data is not None:
         else:
             prefix, suffix = "", "kg"
             
-        # 💡 [5번째 열] 관리코드 서식 추출 (요청하신 부분 추가!)
         sample_e = item_rows['관리코드'].iloc[0] if len(item_rows) > 0 and '관리코드' in item_rows.columns else "0kg"
         num_match_e = re.search(r'(\d+\.?\d*)', str(sample_e))
         if num_match_e:
@@ -122,8 +127,11 @@ if st.session_state.processed_data is not None:
             
         base_sort_1 = item_rows['__sort_1'].min() if not item_rows.empty else df['__sort_1'].max() + 1
             
-        item_rows['재고수량'] = pd.to_numeric(item_rows['재고수량'], errors='coerce').fillna(0)
-        item_rows = item_rows[item_rows['재고수량'] > 0]
+        if '재고수량' in item_rows.columns:
+            item_rows['재고수량'] = pd.to_numeric(item_rows['재고수량'], errors='coerce').fillna(0)
+            item_rows = item_rows[item_rows['재고수량'] > 0]
+        else:
+            item_rows['재고수량'] = 1.0
         
         def extract_num(text):
             m = re.search(r'(\d+\.?\d*)', str(text))
@@ -147,7 +155,6 @@ if st.session_state.processed_data is not None:
                 w_num = float(w_num_match.group(1))
                 opt_price = int((w_num * new_price - base_price) / 10) * 10
                 
-                # 중량과 관리코드에 각각의 기존 서식을 입혀줌
                 formatted_weight = f"{prefix}{w_num}{suffix}"
                 formatted_code = f"{prefix_e}{w_num}{suffix_e}"
                 
@@ -215,10 +222,23 @@ if st.session_state.processed_data is not None:
                 
         wb.save(xls_buffer)
         
+        # 💡 [여기서부터 파일 이름 자동 생성 기능 추가됨!]
+        if not display_df.empty:
+            # 1. 제일 첫 번째 줄의 상품명 가져오기
+            first_item_name = str(display_df[col_item_name].iloc[0])
+            # 2. 파일명에 쓸 수 없는 특수기호(\ / * ? " < > | 등)를 공백으로 없애기
+            safe_item_name = re.sub(r'[\\/*?:"<>|]', "", first_item_name)
+            # 3. 현재 시간 가져오기 (예: 20260409_152030)
+            current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # 4. 파일 이름 조합하기
+            final_filename = f"{safe_item_name}_{current_time}.xls"
+        else:
+            final_filename = "최종수정본_옵션조합.xls"
+        
         st.download_button(
-            label="💾 모든 변경사항 최종 다운로드 (업로드용 XLS 파일)",
+            label=f"💾 모든 변경사항 다운로드 ({final_filename})",
             data=xls_buffer.getvalue(),
-            file_name="최종수정본_옵션조합.xls",
+            file_name=final_filename,
             mime="application/vnd.ms-excel"
         )
     except Exception as e:
