@@ -3,7 +3,7 @@ import pandas as pd
 import re
 import io
 import xlwt 
-from datetime import datetime  # 💡 시간 저장을 위해 새롭게 추가된 돋보기
+from datetime import datetime
 
 st.set_page_config(layout="wide")
 st.title("상품 중량 및 옵션가 자동 생성기 (다중 품목 지원)")
@@ -86,20 +86,66 @@ if st.session_state.processed_data is not None:
     unique_items = df[col_item_name].dropna().unique()
     selected_item = st.selectbox(f"A열({col_item_name})에서 수정할 항목을 선택하세요", unique_items)
     
+    # 단가 추출 및 ⚠️ 실패 시 알림창 추가
     match = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원', str(selected_item)) 
-    original_price_str = match.group(0) if match else ""
-    current_price = int(match.group(1).replace(',', '')) if match else 0
+    if match:
+        original_price_str = match.group(0)
+        current_price = int(match.group(1).replace(',', ''))
+    else:
+        original_price_str = ""
+        current_price = 0
+        st.warning("⚠️ 선택하신 품목명에서 기준단가('OOO원')를 찾을 수 없습니다. 아래 단가를 직접 입력해 주세요!")
         
     col1, col2 = st.columns(2)
     with col1:
         new_price = st.number_input("단가(원) - 변경 시 A열 이름과 옵션가에 자동 반영됩니다", value=current_price, step=100)
     with col2:
-        base_price = st.number_input("기준가(원) 입력", value=52500, step=100)
+        # 💡 기준가 기본값을 0으로 변경
+        base_price = st.number_input("기준가(원) 입력 (필수입력)", value=0, step=100)
     
-    st.markdown("### 2. 새로운 중량 추가")
-    weight_input = st.text_area("중량 리스트를 줄바꿈(Enter)으로 구분하여 입력하세요.", height=150)
+    # 💡 [안전장치] 실시간 계산 미리보기
+    st.markdown("#### 🛡️ 계산 안전장치 (미리보기)")
+    sample_opt = int((5.0 * new_price - base_price) / 10) * 10
+    st.info(f"**적용될 계산 공식:** (중량 × 단가 **{new_price}**원) - 기준가 **{base_price}**원\n\n"
+            f"👉 **예시:** 중량이 5.0kg일 경우, 옵션가는 **{sample_opt}**원으로 책정됩니다. 가격이 맞는지 확인 후 아래 버튼을 눌러주세요!")
+
+    st.markdown("---")
+    st.subheader("2. 중량 관리")
     
-    if st.button(f"👉 '{selected_item}' 작업 적용 및 임시 저장"):
+    # 💡 기존 중량 리스트 표시 (재고가 0보다 큰 것만)
+    item_rows_for_list = df[df[col_item_name] == selected_item].copy()
+    if '재고수량' in item_rows_for_list.columns:
+        item_rows_for_list['재고수량'] = pd.to_numeric(item_rows_for_list['재고수량'], errors='coerce').fillna(0)
+        existing_stock = item_rows_for_list[item_rows_for_list['재고수량'] > 0]
+    else:
+        existing_stock = item_rows_for_list
+    
+    existing_weights_list = existing_stock['중량'].astype(str).tolist()
+    
+    col_w1, col_w2 = st.columns(2)
+    with col_w1:
+        st.markdown("**기존 중량 리스트 (재고 0 제외)**")
+        st.text_area("참고용입니다 (이곳에서 수정 불가)", value="\n".join(existing_weights_list), height=200, disabled=True)
+        
+    with col_w2:
+        st.markdown("**새로운 중량 리스트 추가**")
+        weight_input = st.text_area("추가할 중량만 줄바꿈(Enter)으로 입력하세요.", height=200)
+
+    # 💡 단가만 변경하는 버튼과, 중량도 같이 추가하는 버튼 분리
+    st.markdown("<br>", unsafe_allow_html=True)
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        btn_only_price = st.button("👉 새 중량 추가 없이 [단가/기준가만 일괄 변경]", use_container_width=True)
+    with col_btn2:
+        btn_add_weights = st.button("👉 새 중량 추가하고 [단가/기준가 일괄 변경]", type="primary", use_container_width=True)
+    
+    # 두 버튼 중 하나라도 눌렸을 때의 실행 로직
+    if btn_only_price or btn_add_weights:
+        # 💡 기준가가 0원인 상태로 버튼을 누르면 알림 띄우고 정지!
+        if base_price == 0:
+            st.error("🚨 기준가를 입력해주세요! (현재 0원으로 설정되어 있습니다)")
+            st.stop()
+            
         st.session_state.history.append(df.copy())
         
         if original_price_str:
@@ -145,30 +191,33 @@ if st.session_state.processed_data is not None:
             item_rows['__sort_2'] = item_rows['numeric_weight']
             
         new_rows_data = []
-        weights = weight_input.strip().split('\n')
-        for w_str in weights:
-            w_str = w_str.strip()
-            if not w_str: continue
-            
-            w_num_match = re.search(r'(\d+\.?\d*)', w_str)
-            if w_num_match:
-                w_num = float(w_num_match.group(1))
-                opt_price = int((w_num * new_price - base_price) / 10) * 10
+        
+        # 새 중량 추가 버튼을 눌렀을 때만 텍스트 창 안의 내용을 읽어옵니다.
+        if btn_add_weights:
+            weights = weight_input.strip().split('\n')
+            for w_str in weights:
+                w_str = w_str.strip()
+                if not w_str: continue
                 
-                formatted_weight = f"{prefix}{w_num}{suffix}"
-                formatted_code = f"{prefix_e}{w_num}{suffix_e}"
-                
-                new_rows_data.append({
-                    col_item_name: new_item_name,
-                    "중량": formatted_weight,
-                    "옵션가": opt_price,
-                    "재고수량": 1.0,         
-                    "관리코드": formatted_code,       
-                    "사용여부": "Y",
-                    "numeric_weight": w_num,
-                    "__sort_1": base_sort_1,
-                    "__sort_2": w_num
-                })
+                w_num_match = re.search(r'(\d+\.?\d*)', w_str)
+                if w_num_match:
+                    w_num = float(w_num_match.group(1))
+                    opt_price = int((w_num * new_price - base_price) / 10) * 10
+                    
+                    formatted_weight = f"{prefix}{w_num}{suffix}"
+                    formatted_code = f"{prefix_e}{w_num}{suffix_e}"
+                    
+                    new_rows_data.append({
+                        col_item_name: new_item_name,
+                        "중량": formatted_weight,
+                        "옵션가": opt_price,
+                        "재고수량": 1.0,         
+                        "관리코드": formatted_code,       
+                        "사용여부": "Y",
+                        "numeric_weight": w_num,
+                        "__sort_1": base_sort_1,
+                        "__sort_2": w_num
+                    })
                 
         new_item_df = pd.DataFrame(new_rows_data)
         if not new_item_df.empty:
@@ -194,7 +243,12 @@ if st.session_state.processed_data is not None:
         final_concat = final_concat.sort_values(by=['__sort_1', '__sort_2']).reset_index(drop=True)
         
         st.session_state.processed_data = final_concat
-        st.success(f"✅ '{new_item_name}' 작업 완료! (관리코드 서식도 똑같이 반영되었습니다)")
+        
+        if btn_only_price:
+            st.success(f"✅ '{new_item_name}' 기존 중량들의 단가/기준가가 안전하게 변경되었습니다!")
+        else:
+            st.success(f"✅ '{new_item_name}' 중량 추가 및 단가 일괄 적용이 완료되었습니다!")
+            
         st.rerun()
 
     st.markdown("---")
@@ -222,15 +276,10 @@ if st.session_state.processed_data is not None:
                 
         wb.save(xls_buffer)
         
-        # 💡 [여기서부터 파일 이름 자동 생성 기능 추가됨!]
         if not display_df.empty:
-            # 1. 제일 첫 번째 줄의 상품명 가져오기
             first_item_name = str(display_df[col_item_name].iloc[0])
-            # 2. 파일명에 쓸 수 없는 특수기호(\ / * ? " < > | 등)를 공백으로 없애기
             safe_item_name = re.sub(r'[\\/*?:"<>|]', "", first_item_name)
-            # 3. 현재 시간 가져오기 (예: 20260409_152030)
             current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # 4. 파일 이름 조합하기
             final_filename = f"{safe_item_name}_{current_time}.xls"
         else:
             final_filename = "최종수정본_옵션조합.xls"
