@@ -11,7 +11,7 @@ st.title("상품 중량 및 옵션가 자동 생성기 (다중 품목 지원)")
 # 상태 유지를 위한 초기화
 if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
-    st.session_state.file_name = None
+    st.session_state.last_file_id = None
     st.session_state.col_item_name = None
     st.session_state.history = [] 
 
@@ -19,8 +19,16 @@ if 'processed_data' not in st.session_state:
 uploaded_file = st.file_uploader("기존 양식 파일(xls, xlsx, csv)을 업로드하세요", type=['xls', 'xlsx', 'csv'])
 
 if uploaded_file:
-    if st.session_state.file_name != uploaded_file.name:
+    # 💡 파일 이름이 같아도 내용이 바뀌어 재업로드되면 무조건 초기화되도록 파일 고유 ID 사용
+    current_file_id = getattr(uploaded_file, 'file_id', uploaded_file.name + str(uploaded_file.size))
+    
+    if st.session_state.last_file_id != current_file_id:
         try:
+            # 💡 새 파일이 올라오면 입력창 초기화 (기준가, 중량 텍스트)
+            for key in ['base_price', 'weight_input']:
+                if key in st.session_state:
+                    del st.session_state[key]
+                    
             if uploaded_file.name.endswith('.csv'):
                 file_bytes = uploaded_file.read()
                 encodings = ['utf-8', 'cp949', 'euc-kr', 'utf-8-sig']
@@ -59,9 +67,9 @@ if uploaded_file:
             
             st.session_state.col_item_name = col_name
             st.session_state.processed_data = df.copy()
-            st.session_state.file_name = uploaded_file.name
+            st.session_state.last_file_id = current_file_id
             st.session_state.history = [] 
-            st.success("파일이 성공적으로 로드되었습니다! 아래에서 품목을 선택하고 작업을 진행하세요.")
+            st.success("파일이 성공적으로 로드되었습니다! 기존 입력값들이 모두 초기화되었습니다.")
         except Exception as e:
             st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
             st.stop()
@@ -86,7 +94,6 @@ if st.session_state.processed_data is not None:
     unique_items = df[col_item_name].dropna().unique()
     selected_item = st.selectbox(f"A열({col_item_name})에서 수정할 항목을 선택하세요", unique_items)
     
-    # 단가 추출 및 ⚠️ 실패 시 알림창 추가
     match = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원', str(selected_item)) 
     if match:
         original_price_str = match.group(0)
@@ -100,10 +107,9 @@ if st.session_state.processed_data is not None:
     with col1:
         new_price = st.number_input("단가(원) - 변경 시 A열 이름과 옵션가에 자동 반영됩니다", value=current_price, step=100)
     with col2:
-        # 💡 기준가 기본값을 0으로 변경
-        base_price = st.number_input("기준가(원) 입력 (필수입력)", value=0, step=100)
+        # 💡 key="base_price" 추가 (초기화용)
+        base_price = st.number_input("기준가(원) 입력 (필수입력)", value=0, step=100, key="base_price")
     
-    # 💡 [안전장치] 실시간 계산 미리보기
     st.markdown("#### 🛡️ 계산 안전장치 (미리보기)")
     sample_opt = int((5.0 * new_price - base_price) / 10) * 10
     st.info(f"**적용될 계산 공식:** (중량 × 단가 **{new_price}**원) - 기준가 **{base_price}**원\n\n"
@@ -112,7 +118,6 @@ if st.session_state.processed_data is not None:
     st.markdown("---")
     st.subheader("2. 중량 관리")
     
-    # 💡 기존 중량 리스트 표시 (재고가 0보다 큰 것만)
     item_rows_for_list = df[df[col_item_name] == selected_item].copy()
     if '재고수량' in item_rows_for_list.columns:
         item_rows_for_list['재고수량'] = pd.to_numeric(item_rows_for_list['재고수량'], errors='coerce').fillna(0)
@@ -129,9 +134,9 @@ if st.session_state.processed_data is not None:
         
     with col_w2:
         st.markdown("**새로운 중량 리스트 추가**")
-        weight_input = st.text_area("추가할 중량만 줄바꿈(Enter)으로 입력하세요.", height=200)
+        # 💡 key="weight_input" 추가 (초기화용)
+        weight_input = st.text_area("추가할 중량만 줄바꿈(Enter)으로 입력하세요.", height=200, key="weight_input")
 
-    # 💡 단가만 변경하는 버튼과, 중량도 같이 추가하는 버튼 분리
     st.markdown("<br>", unsafe_allow_html=True)
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
@@ -139,9 +144,7 @@ if st.session_state.processed_data is not None:
     with col_btn2:
         btn_add_weights = st.button("👉 새 중량 추가하고 [단가/기준가 일괄 변경]", type="primary", use_container_width=True)
     
-    # 두 버튼 중 하나라도 눌렸을 때의 실행 로직
     if btn_only_price or btn_add_weights:
-        # 💡 기준가가 0원인 상태로 버튼을 누르면 알림 띄우고 정지!
         if base_price == 0:
             st.error("🚨 기준가를 입력해주세요! (현재 0원으로 설정되어 있습니다)")
             st.stop()
@@ -192,7 +195,6 @@ if st.session_state.processed_data is not None:
             
         new_rows_data = []
         
-        # 새 중량 추가 버튼을 눌렀을 때만 텍스트 창 안의 내용을 읽어옵니다.
         if btn_add_weights:
             weights = weight_input.strip().split('\n')
             for w_str in weights:
@@ -284,11 +286,12 @@ if st.session_state.processed_data is not None:
         else:
             final_filename = "최종수정본_옵션조합.xls"
         
+        # 💡 자동 실행을 막기 위해 mime 타입을 application/octet-stream으로 변경
         st.download_button(
             label=f"💾 모든 변경사항 다운로드 ({final_filename})",
             data=xls_buffer.getvalue(),
             file_name=final_filename,
-            mime="application/vnd.ms-excel"
+            mime="application/octet-stream" 
         )
     except Exception as e:
         st.error(f"엑셀 저장 중 오류가 발생했습니다: {e}")
