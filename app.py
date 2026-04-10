@@ -13,21 +13,23 @@ if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
     st.session_state.last_file_id = None
     st.session_state.col_item_name = None
-    st.session_state.history = [] 
+    st.session_state.history = []
+    st.session_state.global_base_price = 0  # 💡 추가: 전역 기준가
 
 # 1. 파일 업로드
 uploaded_file = st.file_uploader("기존 양식 파일(xls, xlsx, csv)을 업로드하세요", type=['xls', 'xlsx', 'csv'])
 
 if uploaded_file:
-    # 💡 파일 이름이 같아도 내용이 바뀌어 재업로드되면 무조건 초기화되도록 파일 고유 ID 사용
     current_file_id = getattr(uploaded_file, 'file_id', uploaded_file.name + str(uploaded_file.size))
     
     if st.session_state.last_file_id != current_file_id:
         try:
-            # 💡 새 파일이 올라오면 입력창 초기화 (기준가, 중량 텍스트)
             for key in ['base_price', 'weight_input']:
                 if key in st.session_state:
                     del st.session_state[key]
+            
+            # 💡 추가: 새 파일 업로드 시 기준가도 초기화
+            st.session_state.global_base_price = 0
                     
             if uploaded_file.name.endswith('.csv'):
                 file_bytes = uploaded_file.read()
@@ -69,10 +71,39 @@ if uploaded_file:
             st.session_state.processed_data = df.copy()
             st.session_state.last_file_id = current_file_id
             st.session_state.history = [] 
-            st.success("파일이 성공적으로 로드되었습니다! 기존 입력값들이 모두 초기화되었습니다.")
+            st.success("파일이 성공적으로 로드되었습니다! 아래에서 기준가를 먼저 입력해주세요.")
         except Exception as e:
             st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
             st.stop()
+
+# 💡 추가: 파일이 로드된 직후 기준가 입력 섹션 (기준가 미입력 시 이하 작업 차단)
+if st.session_state.processed_data is not None:
+
+    st.markdown("---")
+    st.subheader("⚡ 기준가 설정 (필수)")
+
+    col_bp1, col_bp2 = st.columns([2, 3])
+    with col_bp1:
+        entered_base_price = st.number_input(
+            "🚨 기준가(원)를 입력하세요",
+            min_value=0,
+            value=st.session_state.global_base_price,
+            step=100,
+            key="global_base_price_input"
+        )
+    with col_bp2:
+        if entered_base_price > 0:
+            st.success(f"✅ 기준가 **{entered_base_price:,}원** 이 설정되었습니다. 아래에서 품목별 작업을 진행하세요.")
+        else:
+            st.warning("⚠️ 기준가를 입력해야 이후 작업을 진행할 수 있습니다.")
+
+    # 기준가를 session_state에 저장 (변경 시 즉시 반영)
+    st.session_state.global_base_price = entered_base_price
+
+    # 기준가 미입력 시 이하 작업 전체 차단
+    if st.session_state.global_base_price == 0:
+        st.info("👆 기준가를 입력하면 품목 선택 및 중량 관리 기능이 활성화됩니다.")
+        st.stop()
 
 # 2. 메인 작업 영역
 if st.session_state.processed_data is not None:
@@ -101,19 +132,20 @@ if st.session_state.processed_data is not None:
     else:
         original_price_str = ""
         current_price = 0
-        st.warning("⚠️ 선택하신 품목명에서 기준단가('OOO원')를 찾을 수 없습니다. 아래 단가를 직접 입력해 주세요!")
-        
-    col1, col2 = st.columns(2)
-    with col1:
-        new_price = st.number_input("단가(원) - 변경 시 A열 이름과 옵션가에 자동 반영됩니다", value=current_price, step=100)
-    with col2:
-        # 💡 key="base_price" 추가 (초기화용)
-        base_price = st.number_input("기준가(원) 입력 (필수입력)", value=0, step=100, key="base_price")
+        st.warning("⚠️ 선택하신 품목명에서 기준단가('OOO원')를 찾을 수 없습니다. 아래 팝업창에서 단가를 직접 입력해 주세요!")
     
-    st.markdown("#### 🛡️ 계산 안전장치 (미리보기)")
-    sample_opt = int((5.0 * new_price - base_price) / 10) * 10
-    st.info(f"**적용될 계산 공식:** (중량 × 단가 **{new_price}**원) - 기준가 **{base_price}**원\n\n"
-            f"👉 **예시:** 중량이 5.0kg일 경우, 옵션가는 **{sample_opt}**원으로 책정됩니다. 가격이 맞는지 확인 후 아래 버튼을 눌러주세요!")
+    # 💡 수정: 팝업창에서 기준가 입력 제거, 단가만 설정
+    with st.popover("⚙️ 단가 입력하기 (클릭하여 팝업창 열기)", use_container_width=True):
+        st.markdown("#### 단가 설정")
+        new_price = st.number_input("단가(원) - 변경 시 자동 반영됩니다", value=current_price, step=100)
+        
+        st.divider()
+        st.markdown("#### 🛡️ 계산 안전장치 (미리보기)")
+        # 💡 수정: global_base_price 사용
+        base_price = st.session_state.global_base_price
+        sample_opt = int((5.0 * new_price - base_price) / 10) * 10
+        st.info(f"**적용될 계산 공식:** (중량 × 단가 **{new_price}**원) - 기준가 **{base_price:,}**원\n\n"
+                f"👉 **예시:** 중량이 5.0kg일 경우, 옵션가는 **{sample_opt}**원으로 책정됩니다.")
 
     st.markdown("---")
     st.subheader("2. 중량 관리")
@@ -134,7 +166,6 @@ if st.session_state.processed_data is not None:
         
     with col_w2:
         st.markdown("**새로운 중량 리스트 추가**")
-        # 💡 key="weight_input" 추가 (초기화용)
         weight_input = st.text_area("추가할 중량만 줄바꿈(Enter)으로 입력하세요.", height=200, key="weight_input")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -145,8 +176,10 @@ if st.session_state.processed_data is not None:
         btn_add_weights = st.button("👉 새 중량 추가하고 [단가/기준가 일괄 변경]", type="primary", use_container_width=True)
     
     if btn_only_price or btn_add_weights:
+        # 💡 수정: session_state의 global_base_price 사용 (0 체크 불필요하지만 안전장치 유지)
+        base_price = st.session_state.global_base_price
         if base_price == 0:
-            st.error("🚨 기준가를 입력해주세요! (현재 0원으로 설정되어 있습니다)")
+            st.error("🚨 기준가를 입력해주세요!")
             st.stop()
             
         st.session_state.history.append(df.copy())
@@ -286,7 +319,6 @@ if st.session_state.processed_data is not None:
         else:
             final_filename = "최종수정본_옵션조합.xls"
         
-        # 💡 자동 실행을 막기 위해 mime 타입을 application/octet-stream으로 변경
         st.download_button(
             label=f"💾 모든 변경사항 다운로드 ({final_filename})",
             data=xls_buffer.getvalue(),
