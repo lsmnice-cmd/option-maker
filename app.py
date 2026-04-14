@@ -15,23 +15,25 @@ if 'processed_data' not in st.session_state:
     st.session_state.col_item_name = None
     st.session_state.history = []
     st.session_state.global_base_price = 0
-    st.session_state.last_selected_item = None # 💡 품목 변경 감지용 추가
+    st.session_state.last_selected_item = None 
+    st.session_state.reset_counter = 0 # 💡 에러 방지용: 입력창 강제 초기화 카운터 추가
 
 # 1. 파일 업로드
 uploaded_file = st.file_uploader("기존 양식 파일(xls, xlsx, csv)을 업로드하세요", type=['xls', 'xlsx', 'csv'])
 
 if uploaded_file:
-    # 💡 파일 이름이 같아도 내용이 바뀌어 재업로드되면 무조건 초기화되도록 파일 고유 ID 사용
     current_file_id = getattr(uploaded_file, 'file_id', uploaded_file.name + str(uploaded_file.size))
     
     if st.session_state.last_file_id != current_file_id:
         try:
-            for key in ['base_price', 'weight_input', 'global_base_price_input']:
+            # 기존 캐시 삭제 및 리셋 카운터 증가
+            for key in ['base_price', 'global_base_price_input']:
                 if key in st.session_state:
                     del st.session_state[key]
 
             st.session_state.global_base_price = 0
-            st.session_state.last_selected_item = None # 💡 새 파일 올리면 품목 기록 초기화
+            st.session_state.last_selected_item = None
+            st.session_state.reset_counter += 1 # 💡 새 파일 올리면 입력창 완전 초기화
                     
             if uploaded_file.name.endswith('.csv'):
                 file_bytes = uploaded_file.read()
@@ -123,9 +125,9 @@ if st.session_state.processed_data is not None:
     unique_items = df[col_item_name].dropna().unique()
     selected_item = st.selectbox(f"A열({col_item_name})에서 수정할 항목을 선택하세요", unique_items)
     
-    # 💡 [핵심] 다른 품목을 선택했을 때 중량 입력창(weight_input)을 비워주는 로직
+    # 💡 다른 품목 선택 시 입력창 초기화 (에러 없는 방식)
     if st.session_state.get('last_selected_item') != selected_item:
-        st.session_state.weight_input = ""
+        st.session_state.reset_counter += 1
         st.session_state.last_selected_item = selected_item
     
     match = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원', str(selected_item))
@@ -167,7 +169,8 @@ if st.session_state.processed_data is not None:
         
     with col_w2:
         st.markdown("**새로운 중량 리스트 추가**")
-        weight_input = st.text_area("추가할 중량만 줄바꿈(Enter)으로 입력하세요.", height=200, key="weight_input")
+        # 💡 동적 Key 사용: reset_counter 값이 바뀔 때마다 완전히 깨끗한 새 입력창으로 교체됨
+        weight_input = st.text_area("추가할 중량만 줄바꿈(Enter)으로 입력하세요.", height=200, key=f"weight_input_{st.session_state.reset_counter}")
 
     st.markdown("<br>", unsafe_allow_html=True)
     col_btn1, col_btn2 = st.columns(2)
@@ -284,8 +287,8 @@ if st.session_state.processed_data is not None:
         else:
             st.success(f"✅ '{new_item_name}' 중량 추가 및 단가 일괄 적용이 완료되었습니다!")
             
-        # 💡 [핵심] 버튼을 눌러 작업을 완료했을 때 중량 입력창(weight_input)을 비워주는 로직
-        st.session_state.weight_input = ""
+        # 💡 작업 버튼 누른 후 리셋 카운터 증가 (에러 없이 안전하게 입력창 교체)
+        st.session_state.reset_counter += 1
             
         st.rerun()
 
