@@ -8,16 +8,20 @@ from datetime import datetime
 st.set_page_config(layout="wide")
 st.title("상품 중량 및 옵션가 자동 생성기 (다중 품목 지원)")
 
+# 상태 유지를 위한 초기화
 if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
     st.session_state.last_file_id = None
     st.session_state.col_item_name = None
     st.session_state.history = []
     st.session_state.global_base_price = 0
+    st.session_state.last_selected_item = None # 💡 품목 변경 감지용 추가
 
+# 1. 파일 업로드
 uploaded_file = st.file_uploader("기존 양식 파일(xls, xlsx, csv)을 업로드하세요", type=['xls', 'xlsx', 'csv'])
 
 if uploaded_file:
+    # 💡 파일 이름이 같아도 내용이 바뀌어 재업로드되면 무조건 초기화되도록 파일 고유 ID 사용
     current_file_id = getattr(uploaded_file, 'file_id', uploaded_file.name + str(uploaded_file.size))
     
     if st.session_state.last_file_id != current_file_id:
@@ -27,6 +31,7 @@ if uploaded_file:
                     del st.session_state[key]
 
             st.session_state.global_base_price = 0
+            st.session_state.last_selected_item = None # 💡 새 파일 올리면 품목 기록 초기화
                     
             if uploaded_file.name.endswith('.csv'):
                 file_bytes = uploaded_file.read()
@@ -117,6 +122,11 @@ if st.session_state.processed_data is not None:
     
     unique_items = df[col_item_name].dropna().unique()
     selected_item = st.selectbox(f"A열({col_item_name})에서 수정할 항목을 선택하세요", unique_items)
+    
+    # 💡 [핵심] 다른 품목을 선택했을 때 중량 입력창(weight_input)을 비워주는 로직
+    if st.session_state.get('last_selected_item') != selected_item:
+        st.session_state.weight_input = ""
+        st.session_state.last_selected_item = selected_item
     
     match = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원', str(selected_item))
     if match:
@@ -236,8 +246,8 @@ if st.session_state.processed_data is not None:
                         col_item_name: new_item_name,
                         "중량": formatted_weight,
                         "옵션가": opt_price,
-                        "재고수량": 1.0,
-                        "관리코드": formatted_code,
+                        "재고수량": 1.0,         
+                        "관리코드": formatted_code,       
                         "사용여부": "Y",
                         "numeric_weight": w_num,
                         "__sort_1": base_sort_1,
@@ -257,12 +267,12 @@ if st.session_state.processed_data is not None:
         final_concat = pd.concat([df_remaining, combined_df], ignore_index=True)
         
         final_concat['재고수량'] = pd.to_numeric(final_concat['재고수량'], errors='coerce').fillna(0)
-        group_cols = [col_item_name, '중량', '옵션가']
+        group_cols = [col_item_name, '중량', '옵션가'] 
         
-        agg_dict = {'재고수량': 'sum'}
+        agg_dict = {'재고수량': 'sum'} 
         for c in final_concat.columns:
             if c not in group_cols and c != '재고수량':
-                agg_dict[c] = 'first'
+                agg_dict[c] = 'first' 
                 
         final_concat = final_concat.groupby(group_cols, as_index=False).agg(agg_dict)
         final_concat = final_concat.sort_values(by=['__sort_1', '__sort_2']).reset_index(drop=True)
@@ -273,6 +283,9 @@ if st.session_state.processed_data is not None:
             st.success(f"✅ '{new_item_name}' 기존 중량들의 단가/기준가가 안전하게 변경되었습니다!")
         else:
             st.success(f"✅ '{new_item_name}' 중량 추가 및 단가 일괄 적용이 완료되었습니다!")
+            
+        # 💡 [핵심] 버튼을 눌러 작업을 완료했을 때 중량 입력창(weight_input)을 비워주는 로직
+        st.session_state.weight_input = ""
             
         st.rerun()
 
@@ -293,9 +306,9 @@ if st.session_state.processed_data is not None:
             
         for row_idx, row in enumerate(display_df.values):
             for col_idx, val in enumerate(row):
-                if pd.isna(val):
+                if pd.isna(val): 
                     val = ""
-                elif not isinstance(val, (int, float)):
+                elif not isinstance(val, (int, float)): 
                     val = str(val)
                 ws.write(row_idx + 1, col_idx, val)
                 
