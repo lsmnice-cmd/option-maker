@@ -13,10 +13,11 @@ if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
     st.session_state.last_file_id = None
     st.session_state.col_item_name = None
+    st.session_state.col_weight_name = None # 💡 중량/포장&중량 열 이름 저장용 추가
     st.session_state.history = []
     st.session_state.global_base_price = 0
     st.session_state.last_selected_item = None 
-    st.session_state.reset_counter = 0 # 💡 에러 방지용: 입력창 강제 초기화 카운터 추가
+    st.session_state.reset_counter = 0 
 
 # 1. 파일 업로드
 uploaded_file = st.file_uploader("기존 양식 파일(xls, xlsx, csv)을 업로드하세요", type=['xls', 'xlsx', 'csv'])
@@ -26,14 +27,13 @@ if uploaded_file:
     
     if st.session_state.last_file_id != current_file_id:
         try:
-            # 기존 캐시 삭제 및 리셋 카운터 증가
             for key in ['base_price', 'global_base_price_input']:
                 if key in st.session_state:
                     del st.session_state[key]
 
             st.session_state.global_base_price = 0
             st.session_state.last_selected_item = None
-            st.session_state.reset_counter += 1 # 💡 새 파일 올리면 입력창 완전 초기화
+            st.session_state.reset_counter += 1 
                     
             if uploaded_file.name.endswith('.csv'):
                 file_bytes = uploaded_file.read()
@@ -56,6 +56,7 @@ if uploaded_file:
                 st.error("파일을 제대로 읽지 못했습니다.")
                 st.stop()
                 
+            # A열 이름 찾기
             if '품목 및 등급' in df.columns:
                 col_name = '품목 및 등급'
             elif '품목' in df.columns:
@@ -64,14 +65,20 @@ if uploaded_file:
                 st.error("파일에서 '품목 및 등급' 또는 '품목' 열(A열)을 찾을 수 없습니다.")
                 st.stop()
                 
-            if '중량' not in df.columns:
-                st.error("파일에서 '중량' 열(B열)을 찾을 수 없습니다.")
+            # 💡 B열(중량 관련) 이름 자동 찾기 ('중량' 또는 '포장&중량')
+            if '중량' in df.columns:
+                col_weight = '중량'
+            elif '포장&중량' in df.columns:
+                col_weight = '포장&중량'
+            else:
+                st.error("파일에서 '중량' 또는 '포장&중량' 열(B열)을 찾을 수 없습니다.")
                 st.stop()
                 
             df['__sort_1'] = range(len(df))
             df['__sort_2'] = 0.0
             
             st.session_state.col_item_name = col_name
+            st.session_state.col_weight_name = col_weight # 인식한 B열 이름 저장
             st.session_state.processed_data = df.copy()
             st.session_state.last_file_id = current_file_id
             st.session_state.history = []
@@ -109,6 +116,7 @@ if st.session_state.processed_data is not None:
 if st.session_state.processed_data is not None:
     df = st.session_state.processed_data
     col_item_name = st.session_state.col_item_name
+    col_weight_name = st.session_state.col_weight_name # 💡 저장된 B열 이름 불러오기
     
     st.markdown("---")
     
@@ -125,7 +133,6 @@ if st.session_state.processed_data is not None:
     unique_items = df[col_item_name].dropna().unique()
     selected_item = st.selectbox(f"A열({col_item_name})에서 수정할 항목을 선택하세요", unique_items)
     
-    # 💡 다른 품목 선택 시 입력창 초기화 (에러 없는 방식)
     if st.session_state.get('last_selected_item') != selected_item:
         st.session_state.reset_counter += 1
         st.session_state.last_selected_item = selected_item
@@ -151,7 +158,7 @@ if st.session_state.processed_data is not None:
                 f"👉 **예시:** 중량이 5.0kg일 경우, 옵션가는 **{sample_opt}**원으로 책정됩니다.")
 
     st.markdown("---")
-    st.subheader("2. 중량 관리")
+    st.subheader(f"2. {col_weight_name} 관리") # 💡 이름에 맞춰 화면 글자도 변경
     
     item_rows_for_list = df[df[col_item_name] == selected_item].copy()
     if '재고수량' in item_rows_for_list.columns:
@@ -160,16 +167,15 @@ if st.session_state.processed_data is not None:
     else:
         existing_stock = item_rows_for_list
     
-    existing_weights_list = existing_stock['중량'].astype(str).tolist()
+    existing_weights_list = existing_stock[col_weight_name].astype(str).tolist() # 💡 변경
     
     col_w1, col_w2 = st.columns(2)
     with col_w1:
-        st.markdown("**기존 중량 리스트 (재고 0 제외)**")
+        st.markdown(f"**기존 {col_weight_name} 리스트 (재고 0 제외)**")
         st.text_area("참고용입니다 (이곳에서 수정 불가)", value="\n".join(existing_weights_list), height=200, disabled=True)
         
     with col_w2:
-        st.markdown("**새로운 중량 리스트 추가**")
-        # 💡 동적 Key 사용: reset_counter 값이 바뀔 때마다 완전히 깨끗한 새 입력창으로 교체됨
+        st.markdown(f"**새로운 {col_weight_name} 리스트 추가**")
         weight_input = st.text_area("추가할 중량만 줄바꿈(Enter)으로 입력하세요.", height=200, key=f"weight_input_{st.session_state.reset_counter}")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -194,7 +200,7 @@ if st.session_state.processed_data is not None:
             
         item_rows = df[df[col_item_name] == selected_item].copy()
         
-        sample_b = item_rows['중량'].iloc[0] if len(item_rows) > 0 else "0kg"
+        sample_b = item_rows[col_weight_name].iloc[0] if len(item_rows) > 0 else "0kg" # 💡 변경
         num_match = re.search(r'(\d+\.?\d*)', str(sample_b))
         if num_match:
             prefix = str(sample_b)[:num_match.start()]
@@ -223,7 +229,7 @@ if st.session_state.processed_data is not None:
             return float(m.group(1)) if m else 0.0
             
         if not item_rows.empty:
-            item_rows['numeric_weight'] = item_rows['중량'].apply(extract_num)
+            item_rows['numeric_weight'] = item_rows[col_weight_name].apply(extract_num) # 💡 변경
             item_rows['옵션가'] = (item_rows['numeric_weight'] * new_price - base_price).apply(lambda x: int(x / 10) * 10)
             item_rows[col_item_name] = new_item_name
             item_rows['__sort_1'] = base_sort_1
@@ -247,7 +253,7 @@ if st.session_state.processed_data is not None:
                     
                     new_rows_data.append({
                         col_item_name: new_item_name,
-                        "중량": formatted_weight,
+                        col_weight_name: formatted_weight, # 💡 변경 ('중량' 대신 동적 이름 적용)
                         "옵션가": opt_price,
                         "재고수량": 1.0,         
                         "관리코드": formatted_code,       
@@ -270,7 +276,7 @@ if st.session_state.processed_data is not None:
         final_concat = pd.concat([df_remaining, combined_df], ignore_index=True)
         
         final_concat['재고수량'] = pd.to_numeric(final_concat['재고수량'], errors='coerce').fillna(0)
-        group_cols = [col_item_name, '중량', '옵션가'] 
+        group_cols = [col_item_name, col_weight_name, '옵션가'] # 💡 변경
         
         agg_dict = {'재고수량': 'sum'} 
         for c in final_concat.columns:
@@ -287,7 +293,6 @@ if st.session_state.processed_data is not None:
         else:
             st.success(f"✅ '{new_item_name}' 중량 추가 및 단가 일괄 적용이 완료되었습니다!")
             
-        # 💡 작업 버튼 누른 후 리셋 카운터 증가 (에러 없이 안전하게 입력창 교체)
         st.session_state.reset_counter += 1
             
         st.rerun()
