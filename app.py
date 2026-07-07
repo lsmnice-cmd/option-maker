@@ -14,24 +14,16 @@ if 'processed_data' not in st.session_state:
     st.session_state.col_item_name = None
     st.session_state.history = []
     st.session_state.global_base_price = 0
-    st.session_state.file_format = None   # 💡 추가: 'standard' 또는 'naver'
+    st.session_state.file_format = None   # 'standard' 또는 'naver'
 
 
-# 💡 네이버 추가상품 서식을 내부 표준 서식으로 변환하는 함수
+# 네이버 추가상품 서식 -> 내부 표준 서식 변환
 def naver_to_internal(df_naver):
-    """
-    네이버 추가상품 서식 -> 내부 표준 서식(품목/중량/옵션가/재고수량/관리코드/사용여부)
-    추가상품명 -> 품목 (예: 냉장)프라임갈비본살kg47000)
-    추가상품값 -> 품목명+중량 텍스트 (예: 냉장)프라임갈비본살 IBP원육3.17kg)
-    추가상품가 -> 옵션가
-    """
     rows = []
     for _, r in df_naver.iterrows():
-        item_full = str(r['추가상품명'])          # A열 역할 (단가 포함 품목명)
-        value_full = str(r['추가상품값'])         # 중량 텍스트가 들어있는 원본
         rows.append({
-            '품목': item_full,
-            '중량': value_full,                   # 중량 원본 텍스트를 그대로 보존
+            '품목': str(r['추가상품명']),
+            '중량': str(r['추가상품값']),
             '옵션가': r.get('추가상품가', 0),
             '재고수량': r.get('재고수량', 0),
             '관리코드': r.get('관리코드', ''),
@@ -40,9 +32,9 @@ def naver_to_internal(df_naver):
     return pd.DataFrame(rows)
 
 
-# 💡 내부 표준 서식을 네이버 추가상품 서식으로 되돌리는 함수 (다운로드용)
+# 내부 표준 서식 -> 네이버 추가상품 서식 (다운로드용)
 def internal_to_naver(df_internal, col_item_name):
-    out = pd.DataFrame({
+    return pd.DataFrame({
         '추가상품명': df_internal[col_item_name],
         '추가상품값': df_internal['중량'],
         '추가상품가': df_internal['옵션가'],
@@ -50,7 +42,6 @@ def internal_to_naver(df_internal, col_item_name):
         '사용여부': df_internal.get('사용여부', 'Y'),
         '관리코드': df_internal.get('관리코드', ''),
     })
-    return out
 
 
 uploaded_file = st.file_uploader("기존 양식 파일(xls, xlsx, csv) 또는 네이버 추가상품 파일을 업로드하세요", type=['xls', 'xlsx', 'csv'])
@@ -60,7 +51,7 @@ if uploaded_file:
     
     if st.session_state.last_file_id != current_file_id:
         try:
-            for key in ['base_price', 'weight_input', 'global_base_price_input']:
+            for key in ['base_price', 'weight_input', 'global_base_price_input', 'item_selectbox', 'keep_selected_item']:
                 if key in st.session_state:
                     del st.session_state[key]
 
@@ -87,12 +78,12 @@ if uploaded_file:
                 st.error("파일을 제대로 읽지 못했습니다.")
                 st.stop()
 
-            # 💡 서식 자동 감지: 네이버 추가상품 vs 기존 표준
+            # 서식 자동 감지
             if '추가상품명' in df.columns and '추가상품값' in df.columns:
                 st.session_state.file_format = 'naver'
-                df = naver_to_internal(df)   # 내부 표준 서식으로 변환
+                df = naver_to_internal(df)
                 col_name = '품목'
-                st.info("📌 네이버 추가상품 서식으로 인식했습니다. 내부적으로 변환하여 처리하며, 다운로드 시 네이버 서식으로 저장됩니다.")
+                st.info("📌 네이버 추가상품 서식으로 인식했습니다. 내부 변환 후 처리하며, 다운로드 시 네이버 서식으로 저장됩니다.")
             else:
                 st.session_state.file_format = 'standard'
                 if '품목 및 등급' in df.columns:
@@ -159,22 +150,35 @@ if st.session_state.processed_data is not None:
         can_undo = len(st.session_state.history) > 0
         if st.button("⏪ 방금 한 작업 되돌리기 (Undo)", disabled=not can_undo):
             st.session_state.processed_data = st.session_state.history.pop()
+            if 'item_selectbox' in st.session_state:
+                del st.session_state.item_selectbox
             st.success("이전 상태로 되돌렸습니다!")
             st.rerun()
     
-    unique_items = df[col_item_name].dropna().unique()
-    selected_item = st.selectbox(f"A열({col_item_name})에서 수정할 항목을 선택하세요", unique_items)
+    unique_items = list(df[col_item_name].dropna().unique())
+
+    # 작업 직후 유지해야 할 품목이 있으면 그 품목을 기본 선택으로
+    default_index = 0
+    if 'keep_selected_item' in st.session_state and st.session_state.keep_selected_item in unique_items:
+        default_index = unique_items.index(st.session_state.keep_selected_item)
+        del st.session_state.keep_selected_item
+
+    selected_item = st.selectbox(
+        f"A열({col_item_name})에서 수정할 항목을 선택하세요",
+        unique_items,
+        index=default_index,
+        key="item_selectbox"
+    )
     
-    match = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원?', str(selected_item))
-    # 💡 네이버 서식은 'kg47000'처럼 '원' 없이 단가가 붙어있어 별도 패턴도 시도
+    # 단가 인식 (네이버: kg47000 / 표준: OOO원)
     naver_price_match = re.search(r'kg\s*(\d{3,})', str(selected_item))
+    std_price_match = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원', str(selected_item))
     if naver_price_match:
         original_price_str = naver_price_match.group(0)
         current_price = int(naver_price_match.group(1))
-    elif re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원', str(selected_item)):
-        m2 = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원', str(selected_item))
-        original_price_str = m2.group(0)
-        current_price = int(m2.group(1).replace(',', ''))
+    elif std_price_match:
+        original_price_str = std_price_match.group(0)
+        current_price = int(std_price_match.group(1).replace(',', ''))
     else:
         original_price_str = ""
         current_price = 0
@@ -227,7 +231,7 @@ if st.session_state.processed_data is not None:
             
         st.session_state.history.append(df.copy())
 
-        # 💡 품목명 안의 단가 치환 (표준: OOO원 / 네이버: kgOOOOO)
+        # 품목명 안의 단가 치환 (표준: OOO원 / 네이버: kgOOOOO)
         if original_price_str:
             if st.session_state.file_format == 'naver':
                 new_item_name = str(selected_item).replace(original_price_str, f"kg{new_price}")
@@ -239,7 +243,6 @@ if st.session_state.processed_data is not None:
         item_rows = df[df[col_item_name] == selected_item].copy()
         
         sample_b = item_rows['중량'].iloc[0] if len(item_rows) > 0 else "0kg"
-        # 💡 중량 텍스트 안의 숫자 위치를 찾아 prefix/suffix 분리 (kg 앞 숫자 기준)
         num_match = re.search(r'(\d+\.?\d*)\s*kg', str(sample_b))
         if num_match:
             prefix = str(sample_b)[:num_match.start(1)]
@@ -284,7 +287,6 @@ if st.session_state.processed_data is not None:
             item_rows['numeric_weight'] = item_rows['중량'].apply(extract_num)
             item_rows['옵션가'] = (item_rows['numeric_weight'] * new_price - base_price).apply(lambda x: int(x / 10) * 10)
             item_rows[col_item_name] = new_item_name
-            # 💡 중량 텍스트 안의 품목명 앞부분도 새 품목명 규칙에 맞게 재조립하지 않고 원본 유지
             item_rows['__sort_1'] = base_sort_1
             item_rows['__sort_2'] = item_rows['numeric_weight']
             
@@ -340,6 +342,11 @@ if st.session_state.processed_data is not None:
         final_concat = final_concat.sort_values(by=['__sort_1', '__sort_2']).reset_index(drop=True)
         
         st.session_state.processed_data = final_concat
+
+        # 작업한 품목명을 저장해 rerun 후에도 그대로 선택 유지
+        st.session_state.keep_selected_item = new_item_name
+        if 'item_selectbox' in st.session_state:
+            del st.session_state.item_selectbox
         
         if btn_only_price:
             st.success(f"✅ '{new_item_name}' 기존 중량들의 단가/기준가가 안전하게 변경되었습니다!")
@@ -353,7 +360,6 @@ if st.session_state.processed_data is not None:
     
     display_df = st.session_state.processed_data.drop(columns=['__sort_1', '__sort_2'], errors='ignore')
 
-    # 💡 화면 표시 및 다운로드용 서식 결정
     if st.session_state.file_format == 'naver':
         export_df = internal_to_naver(display_df, col_item_name)
     else:
