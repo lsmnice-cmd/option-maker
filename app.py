@@ -8,13 +8,17 @@ from datetime import datetime
 st.set_page_config(layout="wide")
 st.title("상품 중량 및 옵션가 자동 생성기 (다중 품목 지원)")
 
+# 상태 유지를 위한 초기화
 if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
     st.session_state.last_file_id = None
     st.session_state.col_item_name = None
+    st.session_state.col_weight_name = None   # 중량/포장&중량 열 이름 저장용
     st.session_state.history = []
     st.session_state.global_base_price = 0
-    st.session_state.file_format = None   # 'standard' 또는 'naver'
+    st.session_state.last_selected_item = None
+    st.session_state.reset_counter = 0
+    st.session_state.file_format = None       # 'standard' 또는 'naver'
 
 
 # 네이버 추가상품 서식 -> 내부 표준 서식 변환
@@ -33,10 +37,10 @@ def naver_to_internal(df_naver):
 
 
 # 내부 표준 서식 -> 네이버 추가상품 서식 (다운로드용)
-def internal_to_naver(df_internal, col_item_name):
+def internal_to_naver(df_internal, col_item_name, col_weight_name):
     return pd.DataFrame({
         '추가상품명': df_internal[col_item_name],
-        '추가상품값': df_internal['중량'],
+        '추가상품값': df_internal[col_weight_name],
         '추가상품가': df_internal['옵션가'],
         '재고수량': df_internal['재고수량'],
         '사용여부': df_internal.get('사용여부', 'Y'),
@@ -44,6 +48,7 @@ def internal_to_naver(df_internal, col_item_name):
     })
 
 
+# 1. 파일 업로드
 uploaded_file = st.file_uploader("기존 양식 파일(xls, xlsx, csv) 또는 네이버 추가상품 파일을 업로드하세요", type=['xls', 'xlsx', 'csv'])
 
 if uploaded_file:
@@ -51,11 +56,13 @@ if uploaded_file:
     
     if st.session_state.last_file_id != current_file_id:
         try:
-            for key in ['base_price', 'weight_input', 'global_base_price_input', 'item_selectbox', 'keep_selected_item']:
+            for key in ['base_price', 'global_base_price_input']:
                 if key in st.session_state:
                     del st.session_state[key]
 
             st.session_state.global_base_price = 0
+            st.session_state.last_selected_item = None
+            st.session_state.reset_counter += 1
                     
             if uploaded_file.name.endswith('.csv'):
                 file_bytes = uploaded_file.read()
@@ -78,30 +85,39 @@ if uploaded_file:
                 st.error("파일을 제대로 읽지 못했습니다.")
                 st.stop()
 
-            # 서식 자동 감지
+            # 서식 자동 감지: 네이버 추가상품 vs 기존 표준
             if '추가상품명' in df.columns and '추가상품값' in df.columns:
                 st.session_state.file_format = 'naver'
                 df = naver_to_internal(df)
                 col_name = '품목'
+                col_weight = '중량'
                 st.info("📌 네이버 추가상품 서식으로 인식했습니다. 내부 변환 후 처리하며, 다운로드 시 네이버 서식으로 저장됩니다.")
             else:
                 st.session_state.file_format = 'standard'
+
+                # A열 이름 찾기
                 if '품목 및 등급' in df.columns:
                     col_name = '품목 및 등급'
                 elif '품목' in df.columns:
                     col_name = '품목'
                 else:
-                    st.error("파일에서 '품목 및 등급', '품목', 또는 '추가상품명' 열을 찾을 수 없습니다.")
+                    st.error("파일에서 '품목 및 등급', '품목', 또는 '추가상품명' 열(A열)을 찾을 수 없습니다.")
                     st.stop()
-                
-            if '중량' not in df.columns:
-                st.error("파일에서 '중량' 열을 찾을 수 없습니다.")
-                st.stop()
+
+                # B열(중량 관련) 이름 자동 찾기 ('중량' 또는 '포장&중량')
+                if '중량' in df.columns:
+                    col_weight = '중량'
+                elif '포장&중량' in df.columns:
+                    col_weight = '포장&중량'
+                else:
+                    st.error("파일에서 '중량' 또는 '포장&중량' 열(B열)을 찾을 수 없습니다.")
+                    st.stop()
                 
             df['__sort_1'] = range(len(df))
             df['__sort_2'] = 0.0
             
             st.session_state.col_item_name = col_name
+            st.session_state.col_weight_name = col_weight
             st.session_state.processed_data = df.copy()
             st.session_state.last_file_id = current_file_id
             st.session_state.history = []
@@ -139,6 +155,7 @@ if st.session_state.processed_data is not None:
 if st.session_state.processed_data is not None:
     df = st.session_state.processed_data
     col_item_name = st.session_state.col_item_name
+    col_weight_name = st.session_state.col_weight_name
     
     st.markdown("---")
     
@@ -150,30 +167,20 @@ if st.session_state.processed_data is not None:
         can_undo = len(st.session_state.history) > 0
         if st.button("⏪ 방금 한 작업 되돌리기 (Undo)", disabled=not can_undo):
             st.session_state.processed_data = st.session_state.history.pop()
-            if 'item_selectbox' in st.session_state:
-                del st.session_state.item_selectbox
             st.success("이전 상태로 되돌렸습니다!")
             st.rerun()
     
-    unique_items = list(df[col_item_name].dropna().unique())
-
-    # 작업 직후 유지해야 할 품목이 있으면 그 품목을 기본 선택으로
-    default_index = 0
-    if 'keep_selected_item' in st.session_state and st.session_state.keep_selected_item in unique_items:
-        default_index = unique_items.index(st.session_state.keep_selected_item)
-        del st.session_state.keep_selected_item
-
-    selected_item = st.selectbox(
-        f"A열({col_item_name})에서 수정할 항목을 선택하세요",
-        unique_items,
-        index=default_index,
-        key="item_selectbox"
-    )
+    unique_items = df[col_item_name].dropna().unique()
+    selected_item = st.selectbox(f"A열({col_item_name})에서 수정할 항목을 선택하세요", unique_items)
     
-    # 단가 인식 (네이버: kg47000 / 표준: OOO원)
+    if st.session_state.get('last_selected_item') != selected_item:
+        st.session_state.reset_counter += 1
+        st.session_state.last_selected_item = selected_item
+    
+    # 단가 인식 (표준: OOO원 / 네이버: kg47000)
     naver_price_match = re.search(r'kg\s*(\d{3,})', str(selected_item))
     std_price_match = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원', str(selected_item))
-    if naver_price_match:
+    if st.session_state.file_format == 'naver' and naver_price_match:
         original_price_str = naver_price_match.group(0)
         current_price = int(naver_price_match.group(1))
     elif std_price_match:
@@ -196,7 +203,7 @@ if st.session_state.processed_data is not None:
                 f"👉 **예시:** 중량이 5.0kg일 경우, 옵션가는 **{sample_opt}**원으로 책정됩니다.")
 
     st.markdown("---")
-    st.subheader("2. 중량 관리")
+    st.subheader(f"2. {col_weight_name} 관리")
     
     item_rows_for_list = df[df[col_item_name] == selected_item].copy()
     if '재고수량' in item_rows_for_list.columns:
@@ -205,16 +212,16 @@ if st.session_state.processed_data is not None:
     else:
         existing_stock = item_rows_for_list
     
-    existing_weights_list = existing_stock['중량'].astype(str).tolist()
+    existing_weights_list = existing_stock[col_weight_name].astype(str).tolist()
     
     col_w1, col_w2 = st.columns(2)
     with col_w1:
-        st.markdown("**기존 중량 리스트 (재고 0 제외)**")
+        st.markdown(f"**기존 {col_weight_name} 리스트 (재고 0 제외)**")
         st.text_area("참고용입니다 (이곳에서 수정 불가)", value="\n".join(existing_weights_list), height=200, disabled=True)
         
     with col_w2:
-        st.markdown("**새로운 중량 리스트 추가**")
-        weight_input = st.text_area("추가할 중량만 줄바꿈(Enter)으로 입력하세요.", height=200, key="weight_input")
+        st.markdown(f"**새로운 {col_weight_name} 리스트 추가**")
+        weight_input = st.text_area("추가할 중량만 줄바꿈(Enter)으로 입력하세요.", height=200, key=f"weight_input_{st.session_state.reset_counter}")
 
     st.markdown("<br>", unsafe_allow_html=True)
     col_btn1, col_btn2 = st.columns(2)
@@ -242,31 +249,21 @@ if st.session_state.processed_data is not None:
             
         item_rows = df[df[col_item_name] == selected_item].copy()
         
-        sample_b = item_rows['중량'].iloc[0] if len(item_rows) > 0 else "0kg"
-        num_match = re.search(r'(\d+\.?\d*)\s*kg', str(sample_b))
+        sample_b = item_rows[col_weight_name].iloc[0] if len(item_rows) > 0 else "0kg"
+        num_match = re.search(r'(\d+\.?\d*)', str(sample_b))
         if num_match:
-            prefix = str(sample_b)[:num_match.start(1)]
-            suffix = str(sample_b)[num_match.end(1):]
+            prefix = str(sample_b)[:num_match.start()]
+            suffix = str(sample_b)[num_match.end():]
         else:
-            num_match = re.search(r'(\d+\.?\d*)', str(sample_b))
-            if num_match:
-                prefix = str(sample_b)[:num_match.start()]
-                suffix = str(sample_b)[num_match.end():]
-            else:
-                prefix, suffix = "", "kg"
+            prefix, suffix = "", "kg"
             
         sample_e = item_rows['관리코드'].iloc[0] if len(item_rows) > 0 and '관리코드' in item_rows.columns else "0kg"
-        num_match_e = re.search(r'(\d+\.?\d*)\s*kg', str(sample_e))
+        num_match_e = re.search(r'(\d+\.?\d*)', str(sample_e))
         if num_match_e:
-            prefix_e = str(sample_e)[:num_match_e.start(1)]
-            suffix_e = str(sample_e)[num_match_e.end(1):]
+            prefix_e = str(sample_e)[:num_match_e.start()]
+            suffix_e = str(sample_e)[num_match_e.end():]
         else:
-            num_match_e = re.search(r'(\d+\.?\d*)', str(sample_e))
-            if num_match_e:
-                prefix_e = str(sample_e)[:num_match_e.start()]
-                suffix_e = str(sample_e)[num_match_e.end():]
-            else:
-                prefix_e, suffix_e = "", "kg"
+            prefix_e, suffix_e = "", "kg"
             
         base_sort_1 = item_rows['__sort_1'].min() if not item_rows.empty else df['__sort_1'].max() + 1
             
@@ -277,14 +274,11 @@ if st.session_state.processed_data is not None:
             item_rows['재고수량'] = 1.0
         
         def extract_num(text):
-            m = re.search(r'(\d+\.?\d*)\s*kg', str(text))
-            if m:
-                return float(m.group(1))
             m = re.search(r'(\d+\.?\d*)', str(text))
             return float(m.group(1)) if m else 0.0
             
         if not item_rows.empty:
-            item_rows['numeric_weight'] = item_rows['중량'].apply(extract_num)
+            item_rows['numeric_weight'] = item_rows[col_weight_name].apply(extract_num)
             item_rows['옵션가'] = (item_rows['numeric_weight'] * new_price - base_price).apply(lambda x: int(x / 10) * 10)
             item_rows[col_item_name] = new_item_name
             item_rows['__sort_1'] = base_sort_1
@@ -308,10 +302,10 @@ if st.session_state.processed_data is not None:
                     
                     new_rows_data.append({
                         col_item_name: new_item_name,
-                        "중량": formatted_weight,
+                        col_weight_name: formatted_weight,
                         "옵션가": opt_price,
-                        "재고수량": 1.0,
-                        "관리코드": formatted_code,
+                        "재고수량": 1.0,         
+                        "관리코드": formatted_code,       
                         "사용여부": "Y",
                         "numeric_weight": w_num,
                         "__sort_1": base_sort_1,
@@ -331,27 +325,24 @@ if st.session_state.processed_data is not None:
         final_concat = pd.concat([df_remaining, combined_df], ignore_index=True)
         
         final_concat['재고수량'] = pd.to_numeric(final_concat['재고수량'], errors='coerce').fillna(0)
-        group_cols = [col_item_name, '중량', '옵션가']
+        group_cols = [col_item_name, col_weight_name, '옵션가']
         
-        agg_dict = {'재고수량': 'sum'}
+        agg_dict = {'재고수량': 'sum'} 
         for c in final_concat.columns:
             if c not in group_cols and c != '재고수량':
-                agg_dict[c] = 'first'
+                agg_dict[c] = 'first' 
                 
         final_concat = final_concat.groupby(group_cols, as_index=False).agg(agg_dict)
         final_concat = final_concat.sort_values(by=['__sort_1', '__sort_2']).reset_index(drop=True)
         
         st.session_state.processed_data = final_concat
-
-        # 작업한 품목명을 저장해 rerun 후에도 그대로 선택 유지
-        st.session_state.keep_selected_item = new_item_name
-        if 'item_selectbox' in st.session_state:
-            del st.session_state.item_selectbox
         
         if btn_only_price:
             st.success(f"✅ '{new_item_name}' 기존 중량들의 단가/기준가가 안전하게 변경되었습니다!")
         else:
             st.success(f"✅ '{new_item_name}' 중량 추가 및 단가 일괄 적용이 완료되었습니다!")
+            
+        st.session_state.reset_counter += 1
             
         st.rerun()
 
@@ -360,8 +351,9 @@ if st.session_state.processed_data is not None:
     
     display_df = st.session_state.processed_data.drop(columns=['__sort_1', '__sort_2'], errors='ignore')
 
+    # 다운로드/표시 서식 결정
     if st.session_state.file_format == 'naver':
-        export_df = internal_to_naver(display_df, col_item_name)
+        export_df = internal_to_naver(display_df, col_item_name, col_weight_name)
     else:
         export_df = display_df
 
@@ -378,9 +370,9 @@ if st.session_state.processed_data is not None:
             
         for row_idx, row in enumerate(export_df.values):
             for col_idx, val in enumerate(row):
-                if pd.isna(val):
+                if pd.isna(val): 
                     val = ""
-                elif not isinstance(val, (int, float)):
+                elif not isinstance(val, (int, float)): 
                     val = str(val)
                 ws.write(row_idx + 1, col_idx, val)
                 
@@ -388,12 +380,11 @@ if st.session_state.processed_data is not None:
         
         if not export_df.empty:
             if st.session_state.file_format == 'naver':
-                first_item_name = str(export_df['추가상품명'].iloc[0])
+                prefix_name = "supplementProduct"
             else:
                 first_item_name = str(export_df[col_item_name].iloc[0])
-            safe_item_name = re.sub(r'[\\/*?:"<>|]', "", first_item_name)
+                prefix_name = re.sub(r'[\\/*?:"<>|]', "", first_item_name)
             current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            prefix_name = "supplementProduct" if st.session_state.file_format == 'naver' else safe_item_name
             final_filename = f"{prefix_name}_{current_time}.xls"
         else:
             final_filename = "최종수정본_옵션조합.xls"
