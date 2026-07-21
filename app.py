@@ -144,12 +144,12 @@ def ledger_compare(a, b):
             y = lb[i] if i < len(lb) else None
             rows.append({
                 "월일": d,
-                "A행": x["엑셀행"] if x else "", "A상품명": x["상품명"] if x else "── 없음 ──",
-                "A중량": x["중량"] if x else "", "A단가": x["단가"] if x else "",
-                "A금액": x["금액"] if x else "", "A수금": x["수금"] if x else "",
-                "B행": y["엑셀행"] if y else "", "B상품명": y["상품명"] if y else "── 없음 ──",
-                "B중량": y["중량"] if y else "", "B단가": y["단가"] if y else "",
-                "B금액": y["금액"] if y else "", "B수금": y["수금"] if y else "",
+                "A행": x["엑셀행"] if x else None, "A상품명": x["상품명"] if x else "── 없음 ──",
+                "A중량": x["중량"] if x else None, "A단가": x["단가"] if x else None,
+                "A금액": x["금액"] if x else None, "A수금": x["수금"] if x else None,
+                "B행": y["엑셀행"] if y else None, "B상품명": y["상품명"] if y else "── 없음 ──",
+                "B중량": y["중량"] if y else None, "B단가": y["단가"] if y else None,
+                "B금액": y["금액"] if y else None, "B수금": y["수금"] if y else None,
                 "차이": diff_text(x, y),
             })
     detail = pd.DataFrame(rows)
@@ -196,6 +196,25 @@ def highlight_row(row):
     return [c] * len(row)
 
 
+LEDGER_FMT = {
+    "A행": "{:.0f}", "B행": "{:.0f}",
+    "A중량": "{:,.2f}", "A단가": "{:,.0f}", "A금액": "{:,.0f}", "A수금": "{:,.0f}",
+    "B중량": "{:,.2f}", "B단가": "{:,.0f}", "B금액": "{:,.0f}", "B수금": "{:,.0f}",
+}
+
+DAILY_FMT = {
+    "중량_A": "{:,.2f}", "중량_B": "{:,.2f}", "중량차": "{:,.2f}",
+    "금액_A": "{:,.0f}", "금액_B": "{:,.0f}", "금액차": "{:,.0f}",
+    "건수_A": "{:.0f}", "건수_B": "{:.0f}", "건수차": "{:.0f}",
+}
+
+
+def fmt_summary(v):
+    if isinstance(v, (int, float)):
+        return f"{v:,.2f}".rstrip("0").rstrip(".") if v % 1 else f"{v:,.0f}"
+    return v
+
+
 def run_ledger():
     st.title("📑 거래처원장 비교")
     st.caption("상품명(상품코드)은 달라도 무방하며, 중량·단가·금액·수금이 일치해야 합니다.")
@@ -236,16 +255,21 @@ def run_ledger():
         if detail.empty:
             st.success("✅ 모든 행이 일치합니다.")
         else:
-            st.dataframe(detail.style.apply(highlight_row, axis=1),
-                         use_container_width=True, height=520)
+            st.dataframe(
+                detail.style.apply(highlight_row, axis=1).format(LEDGER_FMT, na_rep=""),
+                use_container_width=True, height=520, hide_index=True)
             st.caption("🔴 한쪽 파일에 없는 행  ·  🟡 값이 다른 행  ·  🔵 위치만 다른 행")
 
     with t2:
-        st.dataframe(daily, use_container_width=True) if not daily.empty \
-            else st.success("✅ 날짜별 차이 없음")
+        if daily.empty:
+            st.success("✅ 날짜별 차이 없음")
+        else:
+            st.dataframe(daily.style.format(DAILY_FMT, na_rep=""),
+                         use_container_width=True, hide_index=True)
 
     with t3:
-        st.dataframe(summary, use_container_width=True)
+        st.dataframe(summary.applymap(fmt_summary),
+                     use_container_width=True, hide_index=True)
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
