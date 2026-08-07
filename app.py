@@ -247,57 +247,90 @@ def compare_daily(a, b, tol_w, tol_amt, use_cash):
               "수금_A", "수금_B", "수금차", "건수_A", "건수_B", "건수차", "판정"]]
 
 
-# ── 행 단위 엄격 대조(참고용) ────────────────────────────────
-def ledger_key(r):
-    return (r["날짜"], round(float(r["중량"]), 2), round(float(r["단가"]), 0),
-            round(float(r["금액"]), 0))
+# ── 품목 짝짓기 (상품명 무시 · 숫자로 매칭) ──────────────────
+PAIR_ORDER = {"A파일 없음": 0, "B파일 없음": 1, "중량·금액 다름": 2,
+              "금액 다름": 3, "중량 다름": 4, "일치": 9}
 
 
-def diff_text(x, y):
-    if x is None:
-        return "A파일 누락"
-    if y is None:
-        return "B파일 누락"
-    d = [k for k in ("중량", "단가", "금액")
-         if abs(float(x[k]) - float(y[k])) > 0.001]
-    return ", ".join(d) + " 다름" if d else "행 위치 차이"
+def match_day(la, lb, tol_w, tol_amt):
+    """같은 날짜의 A행·B행을 숫자만 보고 짝지어 (A행, B행, 구분) 목록을 만든다."""
+    used = set()
+    pairs = []
+
+    def take(cond, score, label):
+        for i, r in enumerate(la):
+            if r.get("_done"):
+                continue
+            best, best_s = None, None
+            for j, s in enumerate(lb):
+                if j in used or not cond(r, s):
+                    continue
+                v = score(r, s)
+                if best_s is None or v < best_s:
+                    best, best_s = j, v
+            if best is not None:
+                used.add(best)
+                r["_done"] = True
+                pairs.append((r, lb[best], label))
+
+    dw = lambda r, s: abs(r["중량"] - s["중량"])
+    da = lambda r, s: abs(r["금액"] - s["금액"])
+    dp = lambda r, s: abs(r["단가"] - s["단가"])
+
+    # 1) 중량·금액 모두 허용오차 안 → 일치
+    take(lambda r, s: dw(r, s) <= tol_w and da(r, s) <= tol_amt,
+         lambda r, s: dw(r, s) + da(r, s) / 1e6, "일치")
+    # 2) 금액은 같은데 중량이 다름
+    take(lambda r, s: da(r, s) <= tol_amt,
+         lambda r, s: dw(r, s), "중량 다름")
+    # 3) 중량은 같은데 금액이 다름 (단가 오타·누락)
+    take(lambda r, s: dw(r, s) <= tol_w,
+         lambda r, s: da(r, s), "금액 다름")
+    # 4) 단가가 같음 → 같은 품목인데 물량이 다름
+    take(lambda r, s: dp(r, s) <= 1,
+         lambda r, s: dw(r, s) + da(r, s) / 1e6, "중량·금액 다름")
+
+    for r in la:
+        if not r.get("_done"):
+            pairs.append((r, None, "B파일 없음"))
+    for j, s in enumerate(lb):
+        if j not in used:
+            pairs.append((None, s, "A파일 없음"))
+    return pairs
 
 
-def compare_rows(a, b):
-    bucket = defaultdict(list)
-    for i, r in b.iterrows():
-        bucket[ledger_key(r)].append(i)
+def build_pairs(a, b, tol_w, tol_amt, overlap_only):
+    """전체 기간을 날짜별로 짝지어 비교 표를 만든다."""
+    item_a = a[(a["중량"] != 0) | (a["금액"] != 0)]
+    item_b = b[(b["중량"] != 0) | (b["금액"] != 0)]
+    dates = sorted(set(item_a["날짜"]) & set(item_b["날짜"])) if overlap_only \
+        else sorted(set(item_a["날짜"]) | set(item_b["날짜"]))
 
-    matched, ua = set(), []
-    for i, r in a.iterrows():
-        k = ledger_key(r)
-        if bucket[k]:
-            matched.add(bucket[k].pop(0))
-        else:
-            ua.append(i)
-    ub = [i for i in b.index if i not in matched]
-
-    ra, rb = a.loc[ua], b.loc[ub]
     rows = []
-    for d in sorted(set(ra["날짜"]) | set(rb["날짜"])):
-        la = ra[ra["날짜"] == d].to_dict("records")
-        lb = rb[rb["날짜"] == d].to_dict("records")
-        for i in range(max(len(la), len(lb))):
-            x = la[i] if i < len(la) else None
-            y = lb[i] if i < len(lb) else None
+    for d in dates:
+        la = item_a[item_a["날짜"] == d].to_dict("records")
+        lb = item_b[item_b["날짜"] == d].to_dict("records")
+        for x, y, label in match_day(la, lb, tol_w, tol_amt):
             rows.append({
-                "날짜": d,
+                "날짜": d, "구분": label,
                 "A행": x["엑셀행"] if x else None,
                 "A상품명": x["상품명"] if x else "── 없음 ──",
-                "A중량": x["중량"] if x else None, "A단가": x["단가"] if x else None,
+                "A중량": x["중량"] if x else None,
+                "A단가": x["단가"] if x else None,
                 "A금액": x["금액"] if x else None,
                 "B행": y["엑셀행"] if y else None,
                 "B상품명": y["상품명"] if y else "── 없음 ──",
-                "B중량": y["중량"] if y else None, "B단가": y["단가"] if y else None,
+                "B중량": y["중량"] if y else None,
+                "B단가": y["단가"] if y else None,
                 "B금액": y["금액"] if y else None,
-                "차이": diff_text(x, y),
+                "중량차": round((x["중량"] if x else 0) - (y["중량"] if y else 0), 2),
+                "금액차": round((x["금액"] if x else 0) - (y["금액"] if y else 0)),
             })
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["_o"] = df["구분"].map(PAIR_ORDER)
+        df = df.sort_values(["날짜", "_o"]).drop(columns="_o").reset_index(drop=True)
+    return df
 
 
 # ── 표시 서식 ───────────────────────────────────────────────
@@ -308,10 +341,17 @@ DAILY_FMT = {
     "건수_A": "{:.0f}", "건수_B": "{:.0f}", "건수차": "{:.0f}",
 }
 
-ROW_FMT = {
+PAIR_FMT = {
     "A행": "{:.0f}", "B행": "{:.0f}",
     "A중량": "{:,.2f}", "A단가": "{:,.0f}", "A금액": "{:,.0f}",
     "B중량": "{:,.2f}", "B단가": "{:,.0f}", "B금액": "{:,.0f}",
+    "중량차": "{:,.2f}", "금액차": "{:,.0f}",
+}
+
+PAIR_COLOR = {
+    "A파일 없음": "#ffd6d6", "B파일 없음": "#ffd6d6",
+    "중량·금액 다름": "#ffe2c2", "금액 다름": "#fff3c4",
+    "중량 다름": "#e8f0fe", "일치": "#f2f7f3",
 }
 
 LINE_FMT = {"중량": "{:,.2f}", "단가": "{:,.0f}", "금액": "{:,.0f}",
@@ -329,23 +369,15 @@ def color_daily(row):
     return [c] * len(row)
 
 
-def color_rows(row):
-    d = str(row.get("차이", ""))
-    if "누락" in d:
-        c = "background-color:#ffd6d6"
-    elif "다름" in d:
-        c = "background-color:#fff3c4"
-    elif "위치" in d:
-        c = "background-color:#e8f0fe"
-    else:
-        c = ""
-    return [c] * len(row)
+def color_pair(row):
+    c = PAIR_COLOR.get(str(row.get("구분", "")), "")
+    return [f"background-color:{c}" if c else ""] * len(row)
 
 
 def run_ledger():
     st.title("📑 거래처원장 비교")
-    st.caption("서식이 서로 달라도 됩니다 · 상품코드/상품명은 무시하고 "
-               "**일자별 중량·금액**이 맞는지 대조합니다.")
+    st.caption("서식이 달라도 됩니다 · 상품명은 무시하고 **중량·단가·금액**만 보고 "
+               "행끼리 짝지어, 어느 건이 어떻게 다른지 나란히 보여줍니다.")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -375,10 +407,10 @@ def run_ledger():
     i2.success(f"**B 서식 인식:** {FORMAT_LABEL[fmt_b]}  \n"
                f"{len(b):,}행 · {b['날짜'].min()} ~ {b['날짜'].max()}")
 
-    overlap = set(a["날짜"]) & set(b["날짜"])
+    overlap = sorted(set(a["날짜"]) & set(b["날짜"]))
     if not overlap:
-        st.warning("⚠️ 두 파일에 **겹치는 날짜가 없습니다.** 출력 기간이 서로 다른 "
-                   "원장인지 확인하세요. (아래 표는 각 파일의 날짜를 그대로 나열합니다)")
+        st.warning("⚠️ 두 파일에 **겹치는 날짜가 하나도 없습니다.** "
+                   "출력 기간이 서로 다른 원장인지 확인하세요.")
 
     st.markdown("---")
     o1, o2, o3 = st.columns([1, 1, 2])
@@ -386,38 +418,72 @@ def run_ledger():
                             step=0.01, format="%.2f")
     tol_amt = o2.number_input("금액 허용오차 (원)", min_value=0, value=10, step=10)
     with o3:
-        use_cash = st.checkbox("수금액도 대조 항목에 포함", value=False)
-        only_diff = st.checkbox("차이 있는 날짜만 보기", value=True)
+        overlap_only = st.checkbox("겹치는 날짜만 대조", value=True)
+        sort_amt = st.checkbox("금액차 큰 순으로 정렬", value=False)
 
-    daily = compare_daily(a, b, tol_w, tol_amt, use_cash)
-    bad = daily[daily["판정"] != "일치"]
+    pairs = build_pairs(a, b, tol_w, tol_amt, overlap_only)
+    diff = pairs[pairs["구분"] != "일치"] if not pairs.empty else pairs
+    daily = compare_daily(a, b, tol_w, tol_amt, False)
+    bad_days = daily[daily["판정"] != "일치"]
 
     st.markdown("---")
     m = st.columns(4)
-    m[0].metric("대조 일자 수", f"{len(daily):,}일", f"불일치 {len(bad):,}일")
-    m[1].metric("중량 합계 차이", f"{a['중량'].sum() - b['중량'].sum():,.2f} kg")
-    m[2].metric("금액 합계 차이", f"{a['금액'].sum() - b['금액'].sum():,.0f} 원")
-    m[3].metric("수금 합계 차이", f"{a['수금'].sum() - b['수금'].sum():,.0f} 원")
+    m[0].metric("대조한 건수", f"{len(pairs):,}건", f"차이 {len(diff):,}건")
+    m[1].metric("차이 나는 날짜", f"{len(set(diff['날짜'])) if not diff.empty else 0}일")
+    m[2].metric("중량 차이 합", f"{diff['중량차'].sum() if not diff.empty else 0:,.2f} kg")
+    m[3].metric("금액 차이 합", f"{diff['금액차'].sum() if not diff.empty else 0:,.0f} 원")
 
-    t1, t2, t3, t4 = st.tabs(["📅 일자별 대조", "🔍 날짜별 상세",
-                              "📋 행 단위 대조(참고)", "📊 요약"])
+    t1, t2, t3, t4 = st.tabs(["🎯 차이 품목 대조", "📅 일자별 대조",
+                              "🔍 날짜별 전체 보기", "📊 요약"])
 
     with t1:
-        view = bad if only_diff else daily
-        if view.empty:
-            st.success("✅ 모든 날짜의 중량·금액이 허용오차 안에서 일치합니다.")
+        if pairs.empty:
+            st.info("대조할 데이터가 없습니다. (겹치는 날짜가 없을 수 있습니다)")
+        elif diff.empty:
+            st.success("✅ 모든 건이 허용오차 안에서 1:1로 맞습니다.")
         else:
-            st.dataframe(view.style.apply(color_daily, axis=1)
-                         .format(DAILY_FMT, na_rep=""),
-                         use_container_width=True, height=520, hide_index=True)
-            st.caption("🟥 한쪽 파일에 날짜 자체가 없음 · 🟨 중량/금액이 다름 · 🟩 일치")
+            f1, f2 = st.columns([1, 3])
+            day_opt = ["전체"] + sorted(set(diff["날짜"]))
+            pick_day = f1.selectbox("날짜", day_opt)
+            kinds = sorted(set(diff["구분"]), key=lambda k: PAIR_ORDER.get(k, 9))
+            pick_kind = f2.multiselect("보고 싶은 유형", kinds, default=kinds)
+
+            view = diff.copy()
+            if pick_day != "전체":
+                view = view[view["날짜"] == pick_day]
+            if pick_kind:
+                view = view[view["구분"].isin(pick_kind)]
+            if sort_amt:
+                view = view.reindex(view["금액차"].abs()
+                                    .sort_values(ascending=False).index)
+
+            st.dataframe(view.style.apply(color_pair, axis=1)
+                         .format(PAIR_FMT, na_rep=""),
+                         use_container_width=True, height=560, hide_index=True)
+            st.caption(
+                "🟥 **A/B파일 없음** — 한쪽에만 있는 건(누락·중복 입력) · "
+                "🟧 **중량·금액 다름** — 단가만 같고 물량이 다름 · "
+                "🟨 **금액 다름** — 중량은 같은데 금액이 다름(단가 차이) · "
+                "🟦 **중량 다름** — 금액은 같은데 중량이 다름  \n"
+                "상품명은 매칭에 쓰지 않고 참고 표시만 합니다. "
+                "수금·입금만 있는 행은 이 표에서 제외됩니다."
+            )
 
     with t2:
-        cand = list(bad["날짜"]) if (only_diff and not bad.empty) else list(daily["날짜"])
+        if bad_days.empty:
+            st.success("✅ 날짜별 중량·금액 합계가 모두 일치합니다.")
+        else:
+            st.dataframe(bad_days.style.apply(color_daily, axis=1)
+                         .format(DAILY_FMT, na_rep=""),
+                         use_container_width=True, height=520, hide_index=True)
+            st.caption("🟥 한쪽 파일에 날짜 자체가 없음 · 🟨 중량/금액 합계가 다름")
+
+    with t3:
+        cand = overlap if overlap else sorted(set(a["날짜"]) | set(b["날짜"]))
         if not cand:
             st.info("표시할 날짜가 없습니다.")
         else:
-            sel = st.selectbox("확인할 날짜", cand)
+            sel = st.selectbox("확인할 날짜", cand, key="detail_day")
             ra = a[a["날짜"] == sel][["엑셀행", "상품명", "중량", "단가", "금액", "수금"]]
             rb = b[b["날짜"] == sel][["엑셀행", "상품명", "중량", "단가", "금액", "수금"]]
             d1, d2 = st.columns(2)
@@ -434,23 +500,12 @@ def run_ledger():
             st.caption(f"차이 → 중량 {ra['중량'].sum() - rb['중량'].sum():,.2f}kg · "
                        f"금액 {ra['금액'].sum() - rb['금액'].sum():,.0f}원")
 
-    with t3:
-        st.caption("날짜·중량·단가·금액이 **모두** 같은 행끼리 짝지어, 짝을 못 찾은 행만 "
-                   "보여줍니다. 두 회사가 한 건을 나눠 적었다면 여기서는 불일치로 나오니 "
-                   "일자별 대조를 우선 보세요.")
-        rows = compare_rows(a, b)
-        if rows.empty:
-            st.success("✅ 모든 행이 1:1로 일치합니다.")
-        else:
-            st.dataframe(rows.style.apply(color_rows, axis=1)
-                         .format(ROW_FMT, na_rep=""),
-                         use_container_width=True, height=480, hide_index=True)
-
     with t4:
         def lastv(df):
             s = df["미수"].dropna()
             return float(s.iloc[-1]) if len(s) else 0.0
 
+        kind_cnt = (diff["구분"].value_counts().to_dict() if not diff.empty else {})
         summary = pd.DataFrame([
             {"항목": "서식", "A파일": FORMAT_LABEL[fmt_a],
              "B파일": FORMAT_LABEL[fmt_b], "차이": ""},
@@ -470,15 +525,18 @@ def run_ledger():
              "차이": f"{a['수금'].sum() - b['수금'].sum():,.0f}"},
             {"항목": "최종 잔액(미수)", "A파일": f"{lastv(a):,.0f}",
              "B파일": f"{lastv(b):,.0f}", "차이": f"{lastv(a) - lastv(b):,.0f}"},
-            {"항목": "불일치 일자", "A파일": f"{len(bad):,}일",
-             "B파일": "", "차이": ""},
-        ])
+        ] + [{"항목": f"[{k}]", "A파일": f"{v}건", "B파일": "", "차이": ""}
+             for k, v in sorted(kind_cnt.items(),
+                                key=lambda kv: PAIR_ORDER.get(kv[0], 9))])
         st.dataframe(summary, use_container_width=True, hide_index=True)
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        (diff if not diff.empty else pd.DataFrame({"결과": ["차이 없음"]})) \
+            .to_excel(w, sheet_name="차이 품목", index=False)
+        if not pairs.empty:
+            pairs.to_excel(w, sheet_name="전체 대조", index=False)
         daily.to_excel(w, sheet_name="일자별 대조", index=False)
-        bad.to_excel(w, sheet_name="불일치 일자", index=False)
         a.to_excel(w, sheet_name="A파일 정규화", index=False)
         b.to_excel(w, sheet_name="B파일 정규화", index=False)
     st.download_button("💾 비교결과 다운로드 (xlsx)", buf.getvalue(),
