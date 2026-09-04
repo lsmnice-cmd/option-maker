@@ -1,9 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-신화 업무 도구 통합 앱  v1.1
+신화 업무 도구 통합 앱  v1.3
  - 거래처원장 비교 (서식 자동 인식 · 일자별 대조)
  - 상품 중량 및 옵션가 자동 생성기
  - 배송 달력 배너 생성기
+
+[v1.3 변경사항]
+ · 단가 입력창을 팝업(클릭해서 열기)에서 **화면에 항상 보이는 입력창**으로 바꿨습니다.
+ · 옆에 1.0 / 3.0 / 5.0kg 옵션가 미리보기를 함께 표시합니다.
+
+[v1.2 변경사항]
+ · 옵션명(품목명)을 입력창에서 직접 고쳐 적용할 수 있습니다.
+   - 옵션명 안의 단가 표기를 고치면 그 단가가 우선 적용됩니다.
+   - 단가 입력창만 바꾼 경우에는 옵션명의 단가 표기가 자동으로 새 단가로 바뀝니다.
+ · [옵션명만 바꾸기] 버튼 추가 — 옵션가·중량은 그대로 두고 이름만 교체.
+ · 전 품목 옵션명 일괄 찾아 바꾸기 기능 추가.
 
 [v1.1 변경사항]
  · 기준가를 바꾸면 파일 안의 **모든 품목·모든 중량**의 옵션가를 한 번에 다시 계산합니다.
@@ -25,7 +36,7 @@ import xlwt
 
 st.set_page_config(page_title="신화 업무 도구", layout="wide")
 
-APP_VERSION = "v1.1"
+APP_VERSION = "v1.3"
 
 # ─────────────────────────────────────────────────────────────
 # 도구 선택
@@ -683,6 +694,28 @@ def calc_option_price(weight, unit_price, base_price):
     return int((weight * unit_price - base_price) / 10) * 10
 
 
+def resolve_name_and_price(edited_name, origin_price, popover_price, file_format):
+    """
+    사용자가 고친 옵션명과 단가 입력창 값을 종합해 '최종 옵션명 / 적용 단가'를 정한다. (v1.2)
+
+      1) 옵션명 안의 단가 표기를 직접 고친 경우 → 그 값을 단가로 채택 (옵션명 우선)
+      2) 그 외에는 단가 입력창 값을 채택하고, 옵션명의 단가 표기를 새 값으로 자동 치환
+    → (최종 옵션명, 적용 단가, 어디서 온 단가인지 설명)
+    """
+    edited_name = str(edited_name).strip()
+    name_price, name_str = extract_unit_price(edited_name, file_format)
+
+    if name_price is not None and origin_price is not None and name_price != origin_price:
+        return edited_name, name_price, "옵션명에 적으신 단가"
+
+    if name_price is not None and name_str:
+        new_str = (f"kg{popover_price}" if name_str.lower().startswith("kg")
+                   else f"{popover_price}원")
+        return edited_name.replace(name_str, new_str), popover_price, "단가 입력창"
+
+    return edited_name, popover_price, "단가 입력창 (옵션명에는 단가 표기가 없음)"
+
+
 def recalc_all_options(df, col_item, col_weight, base_price, file_format):
     """
     파일 안의 모든 행을 현재 기준가로 다시 계산한다.
@@ -912,17 +945,78 @@ def run_option():
         st.warning("⚠️ 선택하신 품목명에서 기준단가를 찾을 수 없습니다. "
                    "아래 팝업창에서 단가를 직접 입력해 주세요!")
 
-    with st.popover("⚙️ 단가 입력하기 (클릭하여 팝업창 열기)", use_container_width=True):
-        st.markdown("#### 단가 설정")
-        new_price = st.number_input("단가(원) - 변경 시 자동 반영됩니다",
-                                    value=current_price, step=100)
-        st.divider()
-        st.markdown("#### 🛡️ 계산 안전장치 (미리보기)")
+    st.markdown("##### ⚙️ 단가 설정")
+    p1, p2 = st.columns([1, 3])
+    with p1:
+        new_price = st.number_input("단가(원) — 바꾸면 바로 반영됩니다", min_value=0,
+                                    value=int(current_price), step=100,
+                                    key=f"unit_price_{ss.reset_counter}")
+    with p2:
         base_price = ss.global_base_price
-        sample_opt = calc_option_price(5.0, new_price, base_price)
-        st.info(f"**적용될 계산 공식:** (중량 × 단가 **{new_price}**원) - 기준가 "
-                f"**{base_price:,}**원\n\n"
-                f"👉 **예시:** 중량이 5.0kg일 경우, 옵션가는 **{sample_opt}**원으로 책정됩니다.")
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.info(
+            f"**계산 공식:** (중량 × 단가 **{new_price:,}**원) − 기준가 "
+            f"**{base_price:,}**원  \n"
+            f"👉 **예시:** 1.0kg → **{calc_option_price(1.0, new_price, base_price):,}원** · "
+            f"3.0kg → **{calc_option_price(3.0, new_price, base_price):,}원** · "
+            f"5.0kg → **{calc_option_price(5.0, new_price, base_price):,}원**"
+        )
+
+    # ── v1.2 : 옵션명 직접 수정 ──────────────────────────────
+    st.markdown("##### ✏️ 옵션명 수정")
+    n1, n2 = st.columns([3, 1])
+    with n1:
+        edited_name = st.text_input(
+            "옵션명(품목명)을 직접 고쳐 쓰실 수 있습니다. 아래 적용 버튼을 누르면 반영됩니다.",
+            value=str(selected_item),
+            key=f"item_name_edit_{ss.reset_counter}")
+    with n2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        btn_rename_only = st.button("✏️ 옵션명만 바꾸기", use_container_width=True)
+
+    final_item_name, apply_price, price_src = resolve_name_and_price(
+        edited_name, current_price, new_price, ss.file_format)
+
+    if final_item_name != str(selected_item) or apply_price != current_price:
+        st.info(f"적용될 옵션명 → **{final_item_name}**  \n"
+                f"적용될 단가 → **{apply_price:,}원** ({price_src} 기준)")
+
+    with st.expander("🔤 전 품목 옵션명 일괄 찾아 바꾸기"):
+        f1, f2, f3 = st.columns([2, 2, 1])
+        find_txt = f1.text_input("찾을 문구", key="rename_find")
+        repl_txt = f2.text_input("바꿀 문구", key="rename_repl")
+        f3.markdown("<br>", unsafe_allow_html=True)
+        do_replace = f3.button("전체 바꾸기", use_container_width=True)
+        hit = (df[col_item_name].astype(str)
+               .str.contains(find_txt, regex=False).sum()) if find_txt else 0
+        st.caption(f"현재 '{find_txt}' 가 들어간 행: **{hit:,}건**" if find_txt
+                   else "찾을 문구를 입력하면 몇 건이 바뀌는지 미리 알려 드립니다. "
+                        "단가 표기를 바꾸신 경우에는 위의 [🔁 지금 전체 다시 계산]을 "
+                        "한 번 눌러 옵션가를 맞춰 주세요.")
+        if do_replace and find_txt:
+            ss.history.append(df.copy())
+            new_df = df.copy()
+            new_df[col_item_name] = (new_df[col_item_name].astype(str)
+                                     .str.replace(find_txt, repl_txt, regex=False))
+            ss.processed_data = new_df
+            st.success(f"✅ {hit:,}건의 옵션명을 바꿨습니다.")
+            st.rerun()
+
+    if btn_rename_only:
+        if not final_item_name:
+            st.error("🚨 옵션명이 비어 있습니다.")
+        elif final_item_name == str(selected_item):
+            st.warning("옵션명이 그대로입니다. 바꿀 내용이 없습니다.")
+        else:
+            ss.history.append(df.copy())
+            new_df = df.copy()
+            mask = new_df[col_item_name] == selected_item
+            new_df.loc[mask, col_item_name] = final_item_name
+            ss.processed_data = new_df
+            ss.last_selected_item = final_item_name
+            st.success(f"✅ 옵션명을 '{final_item_name}' 로 바꿨습니다. "
+                       f"({int(mask.sum()):,}행) · 옵션가는 그대로 두었습니다.")
+            st.rerun()
 
     st.markdown("---")
     st.subheader(f"2. {col_weight_name} 관리")
@@ -964,13 +1058,9 @@ def run_option():
 
         ss.history.append(df.copy())
 
-        if original_price_str:
-            if ss.file_format == 'naver':
-                new_item_name = str(selected_item).replace(original_price_str, f"kg{new_price}")
-            else:
-                new_item_name = str(selected_item).replace(original_price_str, f"{new_price}원")
-        else:
-            new_item_name = str(selected_item)
+        # v1.2 — 편집한 옵션명과 적용 단가를 사용
+        new_item_name = final_item_name if final_item_name else str(selected_item)
+        new_price = apply_price
 
         item_rows = df[df[col_item_name] == selected_item].copy()
 
