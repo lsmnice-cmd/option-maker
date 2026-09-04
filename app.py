@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-신화 업무 도구 통합 앱
+신화 업무 도구 통합 앱  v1.1
  - 거래처원장 비교 (서식 자동 인식 · 일자별 대조)
  - 상품 중량 및 옵션가 자동 생성기
  - 배송 달력 배너 생성기
+
+[v1.1 변경사항]
+ · 기준가를 바꾸면 파일 안의 **모든 품목·모든 중량**의 옵션가를 한 번에 다시 계산합니다.
+   (품목명에 적힌 kg단가를 읽어 "중량 × 단가 − 기준가" 로 재산출)
+ · 자동 재계산 on/off 체크박스와 수동 [지금 다시 계산] 버튼 제공.
+ · 재계산 결과 요약(변경 건수)과 단가를 못 읽은 품목 목록 표시.
+ · 다운로드 직전에 "현재 기준가와 어긋난 행"이 있는지 검산해 경고 표시.
 """
 import io
 import re
@@ -17,6 +24,8 @@ import streamlit.components.v1 as components
 import xlwt
 
 st.set_page_config(page_title="신화 업무 도구", layout="wide")
+
+APP_VERSION = "v1.1"
 
 # ─────────────────────────────────────────────────────────────
 # 도구 선택
@@ -36,7 +45,7 @@ def go_home():
 
 
 if st.session_state.tool is None:
-    st.title("신화 업무 도구")
+    st.title(f"신화 업무 도구 {APP_VERSION}")
     st.caption("사용할 도구를 선택하세요")
     st.markdown("---")
 
@@ -55,7 +64,7 @@ if st.session_state.tool is None:
         st.subheader("⚖️ 상품 중량 및 옵션가 자동 생성기")
         st.write(
             "기준가와 단가를 입력해 중량별 옵션가를 자동 계산합니다.  \n"
-            "**네이버 추가상품 서식**과 기존 표준 서식을 모두 지원합니다."
+            "**기준가를 바꾸면 전 품목 옵션가가 한 번에 다시 계산됩니다.**"
         )
         if st.button("옵션가 생성기 열기", type="primary", use_container_width=True):
             st.session_state.tool = "option"
@@ -84,6 +93,7 @@ with st.sidebar:
         st.rerun()
     st.markdown("---")
     st.button("🏠 메인 화면으로", on_click=go_home, use_container_width=True)
+    st.caption(APP_VERSION)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -641,6 +651,85 @@ def internal_to_naver(df_internal, col_item_name, col_weight_name):
     })
 
 
+# ── 공통 계산 유틸 (v1.1) ────────────────────────────────────
+def extract_num(text):
+    """문자열에서 첫 번째 숫자를 실수로 뽑아낸다. (예: '팩 2.5kg' → 2.5)"""
+    m = re.search(r'(\d+\.?\d*)', str(text))
+    return float(m.group(1)) if m else 0.0
+
+
+def extract_unit_price(item_name, file_format):
+    """
+    품목명에 적힌 kg당 단가를 읽어낸다.
+      · 네이버 서식 : '...kg13500' 형태
+      · 표준 서식   : '...13,500원' 형태
+    → (단가, 품목명에서 매칭된 문자열).  못 찾으면 (None, "")
+    """
+    name = str(item_name)
+    naver_m = re.search(r'kg\s*(\d{3,})', name)
+    std_m = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원', name)
+
+    if file_format == 'naver' and naver_m:
+        return int(naver_m.group(1)), naver_m.group(0)
+    if std_m:
+        return int(std_m.group(1).replace(',', '')), std_m.group(0)
+    if naver_m:
+        return int(naver_m.group(1)), naver_m.group(0)
+    return None, ""
+
+
+def calc_option_price(weight, unit_price, base_price):
+    """옵션가 = (중량 × 단가 − 기준가) 를 10원 단위로 절삭"""
+    return int((weight * unit_price - base_price) / 10) * 10
+
+
+def recalc_all_options(df, col_item, col_weight, base_price, file_format):
+    """
+    파일 안의 모든 행을 현재 기준가로 다시 계산한다.
+    품목명에서 단가를 못 읽은 행은 손대지 않고 그대로 둔다.
+    → (재계산된 df, 값이 바뀐 행 수, 단가를 못 읽은 품목명 목록)
+    """
+    out = df.copy()
+    if '옵션가' not in out.columns:
+        out['옵션가'] = 0
+
+    old = pd.to_numeric(out['옵션가'], errors='coerce')
+    new_vals, skipped = [], []
+
+    for idx, row in out.iterrows():
+        unit, _ = extract_unit_price(row[col_item], file_format)
+        if unit is None:
+            new_vals.append(old.loc[idx] if pd.notna(old.loc[idx]) else 0)
+            nm = str(row[col_item])
+            if nm not in skipped:
+                skipped.append(nm)
+            continue
+        new_vals.append(calc_option_price(extract_num(row[col_weight]),
+                                          unit, base_price))
+
+    out['옵션가'] = new_vals
+    changed = int((old.fillna(-10 ** 9).astype(float)
+                   != pd.Series(new_vals, index=out.index).astype(float)).sum())
+    return out, changed, skipped
+
+
+def count_mismatch(df, col_item, col_weight, base_price, file_format):
+    """현재 기준가 기준으로 계산했을 때 옵션가가 어긋나는 행 수를 센다."""
+    if df is None or df.empty:
+        return 0
+    bad = 0
+    old = pd.to_numeric(df.get('옵션가'), errors='coerce')
+    for idx, row in df.iterrows():
+        unit, _ = extract_unit_price(row[col_item], file_format)
+        if unit is None:
+            continue
+        want = calc_option_price(extract_num(row[col_weight]), unit, base_price)
+        cur = old.loc[idx]
+        if pd.isna(cur) or int(cur) != want:
+            bad += 1
+    return bad
+
+
 def run_option():
     ss = st.session_state
     ss.setdefault('processed_data', None)
@@ -652,9 +741,12 @@ def run_option():
     ss.setdefault('last_selected_item', None)
     ss.setdefault('reset_counter', 0)
     ss.setdefault('file_format', None)
+    ss.setdefault('applied_base_price', None)      # v1.1 — 실제로 적용된 기준가
+    ss.setdefault('auto_recalc', True)             # v1.1 — 자동 재계산 여부
 
     st.title("⚖️ 상품 중량 및 옵션가 자동 생성기")
-    st.caption("다중 품목 지원 · 네이버 추가상품 서식 자동 인식")
+    st.caption("다중 품목 지원 · 네이버 추가상품 서식 자동 인식 · "
+               "기준가 변경 시 전 품목 일괄 재계산")
 
     uploaded_file = st.file_uploader(
         "기존 양식 파일(xls, xlsx, csv) 또는 네이버 추가상품 파일을 업로드하세요",
@@ -669,6 +761,7 @@ def run_option():
                     if key in ss:
                         del ss[key]
                 ss.global_base_price = 0
+                ss.applied_base_price = None
                 ss.last_selected_item = None
                 ss.reset_counter += 1
 
@@ -752,9 +845,47 @@ def run_option():
         st.info("👆 기준가를 입력하면 품목 선택 및 중량 관리 기능이 활성화됩니다.")
         return
 
-    df = ss.processed_data
     col_item_name = ss.col_item_name
     col_weight_name = ss.col_weight_name
+
+    # ── v1.1 : 기준가 변경 시 전 품목 옵션가 일괄 재계산 ─────────
+    st.markdown("##### 🔁 기준가 일괄 반영")
+    r1, r2 = st.columns([3, 1])
+    with r1:
+        ss.auto_recalc = st.checkbox(
+            "기준가를 바꾸면 **파일 안 모든 품목·모든 중량**의 옵션가를 자동으로 다시 계산합니다 "
+            "(품목명에 적힌 kg단가 기준)",
+            value=ss.auto_recalc, key="auto_recalc_cb")
+    with r2:
+        manual_recalc = st.button("🔁 지금 전체 다시 계산", use_container_width=True)
+
+    auto_trigger = (ss.auto_recalc
+                    and ss.applied_base_price != ss.global_base_price)
+
+    if manual_recalc or auto_trigger:
+        ss.history.append(ss.processed_data.copy())
+        new_df, changed, skipped = recalc_all_options(
+            ss.processed_data, col_item_name, col_weight_name,
+            ss.global_base_price, ss.file_format)
+        ss.processed_data = new_df
+        ss.applied_base_price = ss.global_base_price
+
+        st.success(
+            f"✅ 기준가 **{ss.global_base_price:,}원** 기준으로 전체 "
+            f"**{len(new_df):,}행**을 다시 계산했습니다. "
+            f"(값이 바뀐 행 **{changed:,}건**)  \n"
+            "계산식: `옵션가 = (중량 × 품목명의 kg단가 − 기준가)` · 10원 단위 절삭"
+        )
+        if skipped:
+            head = " / ".join(skipped[:5])
+            more = f" 외 {len(skipped) - 5}개" if len(skipped) > 5 else ""
+            st.warning(
+                f"⚠️ 품목명에서 kg단가를 읽지 못해 **건드리지 않은 품목**이 있습니다: "
+                f"{head}{more}  \n"
+                "해당 품목은 아래에서 직접 선택해 단가를 입력한 뒤 적용해 주세요."
+            )
+
+    df = ss.processed_data
 
     st.markdown("---")
     col_title, col_undo = st.columns([3, 1])
@@ -764,6 +895,7 @@ def run_option():
     with col_undo:
         if st.button("⏪ 방금 한 작업 되돌리기 (Undo)", disabled=not ss.history):
             ss.processed_data = ss.history.pop()
+            ss.applied_base_price = None      # 되돌린 뒤 재계산 상태 초기화
             st.success("이전 상태로 되돌렸습니다!")
             st.rerun()
 
@@ -774,16 +906,9 @@ def run_option():
         ss.reset_counter += 1
         ss.last_selected_item = selected_item
 
-    naver_price_match = re.search(r'kg\s*(\d{3,})', str(selected_item))
-    std_price_match = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원', str(selected_item))
-    if ss.file_format == 'naver' and naver_price_match:
-        original_price_str = naver_price_match.group(0)
-        current_price = int(naver_price_match.group(1))
-    elif std_price_match:
-        original_price_str = std_price_match.group(0)
-        current_price = int(std_price_match.group(1).replace(',', ''))
-    else:
-        original_price_str, current_price = "", 0
+    current_price, original_price_str = extract_unit_price(selected_item, ss.file_format)
+    if current_price is None:
+        current_price, original_price_str = 0, ""
         st.warning("⚠️ 선택하신 품목명에서 기준단가를 찾을 수 없습니다. "
                    "아래 팝업창에서 단가를 직접 입력해 주세요!")
 
@@ -794,7 +919,7 @@ def run_option():
         st.divider()
         st.markdown("#### 🛡️ 계산 안전장치 (미리보기)")
         base_price = ss.global_base_price
-        sample_opt = int((5.0 * new_price - base_price) / 10) * 10
+        sample_opt = calc_option_price(5.0, new_price, base_price)
         st.info(f"**적용될 계산 공식:** (중량 × 단가 **{new_price}**원) - 기준가 "
                 f"**{base_price:,}**원\n\n"
                 f"👉 **예시:** 중량이 5.0kg일 경우, 옵션가는 **{sample_opt}**원으로 책정됩니다.")
@@ -876,14 +1001,10 @@ def run_option():
         else:
             item_rows['재고수량'] = 1.0
 
-        def extract_num(text):
-            m = re.search(r'(\d+\.?\d*)', str(text))
-            return float(m.group(1)) if m else 0.0
-
         if not item_rows.empty:
             item_rows['numeric_weight'] = item_rows[col_weight_name].apply(extract_num)
-            item_rows['옵션가'] = (item_rows['numeric_weight'] * new_price
-                                - base_price).apply(lambda x: int(x / 10) * 10)
+            item_rows['옵션가'] = item_rows['numeric_weight'].apply(
+                lambda w: calc_option_price(w, new_price, base_price))
             item_rows[col_item_name] = new_item_name
             item_rows['__sort_1'] = base_sort_1
             item_rows['__sort_2'] = item_rows['numeric_weight']
@@ -897,7 +1018,7 @@ def run_option():
                 w_num_match = re.search(r'(\d+\.?\d*)', w_str)
                 if w_num_match:
                     w_num = float(w_num_match.group(1))
-                    opt_price = int((w_num * new_price - base_price) / 10) * 10
+                    opt_price = calc_option_price(w_num, new_price, base_price)
                     new_rows_data.append({
                         col_item_name: new_item_name,
                         col_weight_name: f"{prefix}{w_num}{suffix}",
@@ -941,6 +1062,17 @@ def run_option():
 
     st.markdown("---")
     st.subheader("3. 최종 결과물 확인 및 다운로드")
+
+    # v1.1 — 현재 기준가와 어긋난 행이 남아 있는지 검산
+    mismatch = count_mismatch(ss.processed_data, col_item_name, col_weight_name,
+                              ss.global_base_price, ss.file_format)
+    if mismatch:
+        st.warning(f"⚠️ 현재 기준가({ss.global_base_price:,}원) 계산값과 다른 행이 "
+                   f"**{mismatch:,}건** 있습니다. 위의 [🔁 지금 전체 다시 계산]을 "
+                   "누르면 전부 맞춰집니다.")
+    else:
+        st.success(f"✅ 모든 행이 현재 기준가({ss.global_base_price:,}원) 기준으로 "
+                   "정확히 계산되어 있습니다.")
 
     display_df = ss.processed_data.drop(columns=['__sort_1', '__sort_2'], errors='ignore')
     if ss.file_format == 'naver':
