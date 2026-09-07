@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-신화 업무 도구 통합 앱  v1.3
+신화 업무 도구 통합 앱  v1.4
  - 거래처원장 비교 (서식 자동 인식 · 일자별 대조)
  - 상품 중량 및 옵션가 자동 생성기
  - 배송 달력 배너 생성기
+
+[v1.4 변경사항]
+ · 비어 있던 배송 달력 배너 생성기 HTML을 다시 넣었습니다 (자리표시자 __CALENDAR_HTML__ → 실제 HTML).
+ · 배너 저장 시 결과 이미지를 화면에도 표시해 iframe에서 다운로드가 막혀도 우클릭 저장이 가능합니다.
 
 [v1.3 변경사항]
  · 단가 입력창을 팝업(클릭해서 열기)에서 **화면에 항상 보이는 입력창**으로 바꿨습니다.
@@ -36,7 +40,7 @@ import xlwt
 
 st.set_page_config(page_title="신화 업무 도구", layout="wide")
 
-APP_VERSION = "v1.3"
+APP_VERSION = "v1.4"
 
 # ─────────────────────────────────────────────────────────────
 # 도구 선택
@@ -1207,7 +1211,487 @@ def run_option():
 # ═════════════════════════════════════════════════════════════
 # 도구 3 — 배송 달력 배너 생성기 (HTML 내장)
 # ═════════════════════════════════════════════════════════════
-BANNER_HTML = r"""__CALENDAR_HTML__"""
+BANNER_HTML = r"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>배송 달력 배너 생성기</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/pretendard/1.3.9/static/pretendard.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<style>
+:root{
+  --ink:#1c1c1e; --paper:#f5f4f0; --panel:#ffffff; --line:#e4e2db;
+  --accent:#0e3b2e;
+  --off:#c0392b; --off-soft:#fdecea;          /* 배송 휴무 */
+  --resume:#1f5fbf; --resume-soft:#e8f0fc;    /* 배송 재개 */
+  --allcut:#b45309; --allcut-soft:#fdf0e0;    /* 전지역 배송 마감 */
+  --onecut:#6d28d9; --onecut-soft:#f1eafd;    /* 오네지역 배송 마감 */
+}
+*{box-sizing:border-box; margin:0; padding:0;}
+body{
+  font-family:'Pretendard Variable',Pretendard,-apple-system,'Noto Sans KR',sans-serif;
+  background:var(--paper); color:var(--ink); min-height:100vh;
+}
+.app{max-width:1180px; margin:0 auto; padding:28px 20px 60px;}
+.app-head{margin-bottom:22px;}
+.app-head h1{font-size:22px; font-weight:800; letter-spacing:-0.02em;}
+.app-head p{font-size:13px; color:#777; margin-top:4px;}
+.layout{display:grid; grid-template-columns:340px 1fr; gap:26px; align-items:start;}
+@media (max-width:920px){ .layout{grid-template-columns:1fr;} }
+
+/* ---------- 컨트롤 패널 ---------- */
+.panel{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px;}
+.panel + .panel{margin-top:16px;}
+.panel h2{font-size:13px; font-weight:700; color:#999; letter-spacing:0.08em; margin-bottom:12px;}
+.row{display:flex; gap:8px; margin-bottom:10px;}
+.row:last-child{margin-bottom:0;}
+label.field{display:block; font-size:12px; font-weight:600; color:#555; margin-bottom:5px;}
+input[type=text], select{
+  width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:8px;
+  font-size:14px; font-family:inherit; background:#fff;
+}
+input[type=text]:focus, select:focus{outline:2px solid var(--accent); outline-offset:-1px;}
+.field-group{margin-bottom:14px;}
+.field-group:last-child{margin-bottom:0;}
+
+.mode-btns{display:grid; grid-template-columns:1fr 1fr; gap:6px;}
+.mode-btn{
+  padding:11px 6px; border-radius:9px; border:1.5px solid var(--line); background:#fff;
+  font-size:13px; font-weight:700; cursor:pointer; font-family:inherit; transition:all .12s;
+  line-height:1.25;
+}
+.mode-btn.off.active{border-color:var(--off); background:var(--off-soft); color:var(--off);}
+.mode-btn.resume.active{border-color:var(--resume); background:var(--resume-soft); color:var(--resume);}
+.mode-btn.allcut.active{border-color:var(--allcut); background:var(--allcut-soft); color:var(--allcut);}
+.mode-btn.onecut.active{border-color:var(--onecut); background:var(--onecut-soft); color:var(--onecut);}
+.mode-btn.erase.active{border-color:#555; background:#f0f0f0; color:#333;}
+.hint{font-size:12px; color:#999; margin-top:10px; line-height:1.5;}
+
+.week-list{display:flex; flex-direction:column; gap:6px;}
+.week-item{
+  display:flex; align-items:center; gap:10px; padding:9px 12px;
+  border:1.5px solid var(--line); border-radius:9px; cursor:pointer;
+  font-size:13px; font-weight:600; color:#666; background:#fff; transition:all .12s;
+  user-select:none;
+}
+.week-item.on{border-color:var(--accent); background:#eef4f0; color:var(--accent);}
+.week-item input{accent-color:var(--accent); width:15px; height:15px; cursor:pointer;}
+
+.theme-btns{display:grid; grid-template-columns:repeat(4,1fr); gap:8px;}
+.theme-btn{
+  height:44px; border-radius:9px; cursor:pointer; border:2px solid transparent;
+  display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; color:#fff;
+  font-family:inherit;
+}
+.theme-btn.active{border-color:var(--ink); box-shadow:0 0 0 2px #fff inset;}
+
+.export-btns{display:grid; grid-template-columns:1fr 1fr; gap:8px;}
+.export-btn{
+  padding:13px; border-radius:10px; border:none; cursor:pointer;
+  font-size:14px; font-weight:800; font-family:inherit; transition:opacity .12s;
+}
+.export-btn:hover{opacity:.88;}
+.export-btn.png{background:var(--ink); color:#fff;}
+.export-btn.jpg{background:#fff; color:var(--ink); border:1.5px solid var(--ink);}
+.size-note{font-size:12px; color:#999; margin-top:8px; text-align:center;}
+.result-wrap{margin-top:12px; display:none;}
+.result-wrap img{width:100%; border:1px solid var(--line); border-radius:8px;}
+.result-wrap p{font-size:12px; color:#777; margin-top:6px; line-height:1.5;}
+
+/* ---------- 배너 미리보기 ---------- */
+.preview-wrap{overflow-x:auto;}
+.banner{
+  width:720px; margin:0 auto; background:var(--b-paper,#faf9f5);
+  border:1px solid var(--line);
+  --b-accent:#0e3b2e; --b-accent-text:#faf9f5; --b-paper:#faf9f5; --b-ink:#22221f;
+}
+
+.b-head{
+  background:var(--b-accent); color:var(--b-accent-text);
+  padding:38px 44px 32px; position:relative;
+}
+.b-head .en{
+  font-size:12px; letter-spacing:0.34em; font-weight:600; opacity:.75; text-transform:uppercase;
+}
+.b-head .month-line{display:flex; align-items:flex-end; gap:16px; margin-top:8px;}
+.b-head .month-num{font-size:76px; font-weight:800; line-height:0.9; letter-spacing:-0.03em;}
+.b-head .month-unit{font-size:26px; font-weight:700; padding-bottom:6px;}
+.b-head .title{
+  font-size:21px; font-weight:600; margin-top:16px; letter-spacing:-0.01em;
+  white-space:pre-wrap;
+}
+.b-head .stamp{
+  position:absolute; right:44px; top:40px; width:86px; height:86px; border-radius:50%;
+  border:1.5px solid currentColor; opacity:.85;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+  font-size:12px; font-weight:700; letter-spacing:0.12em; text-align:center; line-height:1.3;
+}
+.stamp .s-small{font-size:10px; letter-spacing:0.2em; opacity:.8;}
+
+.b-legend{
+  display:flex; flex-wrap:wrap; gap:12px 20px; padding:18px 44px; border-bottom:1px solid var(--line);
+  font-size:13px; font-weight:600; color:var(--b-ink); background:var(--b-paper);
+}
+.b-legend .item{display:flex; align-items:center; gap:7px;}
+.dot{width:11px; height:11px; border-radius:50%; flex-shrink:0;}
+.dot.off{background:var(--off);}
+.dot.resume{background:transparent; border:2.5px solid var(--resume); width:8px; height:8px;}
+.dot.allcut{background:var(--allcut);}
+.dot.onecut{background:transparent; border:2.5px solid var(--onecut); width:8px; height:8px;}
+
+.b-cal{padding:26px 44px 8px; background:var(--b-paper);}
+.cal-grid{width:100%; border-collapse:collapse; table-layout:fixed;}
+.cal-grid th{
+  font-size:13px; font-weight:700; color:#8a8a82; padding-bottom:12px;
+  letter-spacing:0.06em;
+}
+.cal-grid th.sun{color:var(--off);}
+.cal-grid td{
+  height:84px; vertical-align:top; text-align:center; cursor:pointer; position:relative;
+  border-top:1px solid var(--line);
+}
+.cal-grid td:hover .num{outline:2px dashed #bbb; outline-offset:2px;}
+.cal-grid td.empty{cursor:default;}
+.cal-grid td.empty:hover .num{outline:none;}
+.num{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:38px; height:38px; border-radius:50%; margin-top:10px;
+  font-size:16px; font-weight:600; color:var(--b-ink);
+}
+td.sun .num{color:var(--off);}
+td.st-off .num{background:var(--off); color:#fff; font-weight:700;}
+td.st-resume .num{border:2.5px solid var(--resume); color:var(--resume); font-weight:700;}
+td.st-allcut .num{background:var(--allcut); color:#fff; font-weight:700;}
+td.st-onecut .num{border:2.5px solid var(--onecut); color:var(--onecut); font-weight:700;}
+.tag{
+  display:block; font-size:10.5px; font-weight:800; margin-top:4px; letter-spacing:-0.01em;
+  line-height:1.2;
+}
+.tag.off{color:var(--off);}
+.tag.resume{color:var(--resume);}
+.tag.allcut{color:var(--allcut);}
+.tag.onecut{color:var(--onecut);}
+
+.b-foot{
+  padding:20px 44px 30px; background:var(--b-paper);
+  font-size:13.5px; line-height:1.65; color:#55554e; white-space:pre-wrap;
+}
+.b-foot .bar{width:26px; height:3px; background:var(--b-accent); margin-bottom:12px;}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="app-head">
+    <h1>배송 달력 배너 생성기</h1>
+    <p>날짜를 클릭해 배송 휴무·마감·재개일을 표시하고, 보여줄 주만 골라 PNG/JPG로 내보내세요.</p>
+  </div>
+
+  <div class="layout">
+    <div>
+      <div class="panel">
+        <h2>기본 설정</h2>
+        <div class="field-group">
+          <div class="row">
+            <div style="flex:1">
+              <label class="field">연도</label>
+              <select id="selYear"></select>
+            </div>
+            <div style="flex:1">
+              <label class="field">월</label>
+              <select id="selMonth"></select>
+            </div>
+          </div>
+        </div>
+        <div class="field-group">
+          <label class="field">제목</label>
+          <input type="text" id="inpTitle" value="">
+        </div>
+        <div class="field-group">
+          <label class="field">하단 안내 문구</label>
+          <input type="text" id="inpNotice" value="배송 휴무 기간 주문 건은 배송 재개일부터 순차 발송됩니다. 신선식품 특성상 발송 일정을 꼭 확인해 주세요.">
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>날짜 표시 모드</h2>
+        <div class="mode-btns">
+          <button class="mode-btn off active" data-mode="off">배송 휴무</button>
+          <button class="mode-btn resume" data-mode="resume">배송 재개</button>
+          <button class="mode-btn allcut" data-mode="allcut">전지역 배송 마감</button>
+          <button class="mode-btn onecut" data-mode="onecut">오네지역 배송 마감</button>
+          <button class="mode-btn erase" data-mode="erase" style="grid-column:1/-1">지우기</button>
+        </div>
+        <p class="hint">모드를 선택한 뒤 오른쪽 달력에서 날짜를 클릭하면 표시됩니다. 같은 날짜를 다시 클릭하면 해제됩니다.</p>
+      </div>
+
+      <div class="panel">
+        <h2>표시할 주 선택</h2>
+        <div class="week-list" id="weekList"></div>
+        <p class="hint">체크한 주만 배너에 표시됩니다. 필요한 주만 남기면 배너가 더 간결해집니다.</p>
+      </div>
+
+      <div class="panel">
+        <h2>색상 테마</h2>
+        <div class="theme-btns" id="themeBtns"></div>
+      </div>
+
+      <div class="panel">
+        <h2>내보내기</h2>
+        <div class="export-btns">
+          <button class="export-btn png" id="btnPng">PNG 저장</button>
+          <button class="export-btn jpg" id="btnJpg">JPG 저장</button>
+        </div>
+        <p class="size-note">2160px 폭 고해상도로 저장됩니다.</p>
+        <div class="result-wrap" id="resultWrap">
+          <img id="resultImg" alt="생성된 배너">
+          <p>자동 다운로드가 막힌 환경이라면 위 이미지를 <b>우클릭 → 이미지를 다른 이름으로 저장</b>(모바일은 길게 누르기) 하세요.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="preview-wrap">
+      <div class="banner" id="banner">
+        <div class="b-head">
+          <div class="en" id="bEn"></div>
+          <div class="month-line">
+            <span class="month-num" id="bMonthNum"></span>
+            <span class="month-unit">월</span>
+          </div>
+          <div class="title" id="bTitle"></div>
+          <div class="stamp"><span class="s-small">NOTICE</span><span>배송<br>안내</span></div>
+        </div>
+        <div class="b-legend" id="bLegend"></div>
+        <div class="b-cal">
+          <table class="cal-grid">
+            <thead>
+              <tr>
+                <th class="sun">일</th><th>월</th><th>화</th><th>수</th><th>목</th><th>금</th><th>토</th>
+              </tr>
+            </thead>
+            <tbody id="calBody"></tbody>
+          </table>
+        </div>
+        <div class="b-foot">
+          <div class="bar"></div>
+          <span id="bNotice"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const MONTH_EN = ['JANUARY','FEBRUARY','MARCH','APRIL','MAY','JUNE','JULY','AUGUST','SEPTEMBER','OCTOBER','NOVEMBER','DECEMBER'];
+const THEMES = [
+  {name:'딥그린',  accent:'#0e3b2e', paper:'#faf9f5', text:'#faf9f5'},
+  {name:'네이비',  accent:'#152847', paper:'#f8f9fb', text:'#f8f9fb'},
+  {name:'버건디',  accent:'#5e1f26', paper:'#fbf8f6', text:'#fbf6f2'},
+  {name:'차콜',    accent:'#26262a', paper:'#f7f7f5', text:'#f5f5f2'},
+];
+const MARK_DEF = {
+  off:    {label:'배송 휴무',        tag:'배송휴무'},
+  resume: {label:'배송 재개일',      tag:'배송재개'},
+  allcut: {label:'전지역 배송 마감', tag:'전지역마감'},
+  onecut: {label:'오네지역 배송 마감', tag:'오네마감'},
+};
+
+const state = {
+  year: new Date().getFullYear(),
+  month: new Date().getMonth(), // 0-based
+  mode: 'off',
+  theme: 0,
+  marks: {},        // "YYYY-M-D" -> off|resume|allcut|onecut
+  weeksOn: {},      // "YYYY-M" -> [true,...] 주별 표시 여부
+};
+
+/* --- 셀렉트 초기화 --- */
+const selYear = document.getElementById('selYear');
+const selMonth = document.getElementById('selMonth');
+const thisYear = new Date().getFullYear();
+for(let y = thisYear - 1; y <= thisYear + 2; y++){
+  const o = document.createElement('option');
+  o.value = y; o.textContent = y + '년';
+  selYear.appendChild(o);
+}
+for(let m = 0; m < 12; m++){
+  const o = document.createElement('option');
+  o.value = m; o.textContent = (m+1) + '월';
+  selMonth.appendChild(o);
+}
+selYear.value = state.year;
+selMonth.value = state.month;
+
+selYear.addEventListener('change', () => { state.year = +selYear.value; render(); });
+selMonth.addEventListener('change', () => {
+  state.month = +selMonth.value;
+  const t = document.getElementById('inpTitle');
+  if(/^\d+월 배송 일정 안내$/.test(t.value)) t.value = (state.month+1) + '월 배송 일정 안내';
+  render();
+});
+
+document.getElementById('inpTitle').addEventListener('input', render);
+document.getElementById('inpNotice').addEventListener('input', render);
+
+/* --- 모드 버튼 --- */
+document.querySelectorAll('.mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    state.mode = btn.dataset.mode;
+    document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b === btn));
+  });
+});
+
+/* --- 테마 버튼 --- */
+const themeWrap = document.getElementById('themeBtns');
+THEMES.forEach((t, i) => {
+  const b = document.createElement('button');
+  b.className = 'theme-btn' + (i === 0 ? ' active' : '');
+  b.style.background = t.accent;
+  b.textContent = t.name;
+  b.addEventListener('click', () => {
+    state.theme = i;
+    themeWrap.querySelectorAll('.theme-btn').forEach((x, j) => x.classList.toggle('active', j === i));
+    render();
+  });
+  themeWrap.appendChild(b);
+});
+
+function keyOf(d){ return state.year + '-' + state.month + '-' + d; }
+function monthKey(){ return state.year + '-' + state.month; }
+
+/* 이 달의 주 배열 생성: [[날짜 or 0(빈칸) × 7], ...] */
+function buildWeeks(){
+  const first = new Date(state.year, state.month, 1).getDay();
+  const days = new Date(state.year, state.month + 1, 0).getDate();
+  const weeks = [];
+  let week = new Array(first).fill(0);
+  for(let d = 1; d <= days; d++){
+    week.push(d);
+    if(week.length === 7){ weeks.push(week); week = []; }
+  }
+  if(week.length){ while(week.length < 7) week.push(0); weeks.push(week); }
+  return weeks;
+}
+
+function getWeeksOn(weekCount){
+  const k = monthKey();
+  if(!state.weeksOn[k] || state.weeksOn[k].length !== weekCount){
+    state.weeksOn[k] = new Array(weekCount).fill(true);
+  }
+  return state.weeksOn[k];
+}
+
+function onDayClick(d){
+  const k = keyOf(d);
+  if(state.mode === 'erase'){ delete state.marks[k]; }
+  else if(state.marks[k] === state.mode){ delete state.marks[k]; }
+  else { state.marks[k] = state.mode; }
+  render();
+}
+
+function render(){
+  const t = THEMES[state.theme];
+  const banner = document.getElementById('banner');
+  banner.style.setProperty('--b-accent', t.accent);
+  banner.style.setProperty('--b-paper', t.paper);
+  banner.style.setProperty('--b-accent-text', t.text);
+
+  document.getElementById('bEn').textContent = MONTH_EN[state.month] + ' ' + state.year + ' · DELIVERY CALENDAR';
+  document.getElementById('bMonthNum').textContent = state.month + 1;
+  document.getElementById('bTitle').textContent = document.getElementById('inpTitle').value || '';
+  document.getElementById('bNotice').textContent = document.getElementById('inpNotice').value || '';
+
+  const weeks = buildWeeks();
+  const on = getWeeksOn(weeks.length);
+
+  /* --- 주 선택 체크박스 --- */
+  const wl = document.getElementById('weekList');
+  wl.innerHTML = '';
+  weeks.forEach((week, i) => {
+    const daysIn = week.filter(d => d > 0);
+    const range = (state.month+1) + '/' + daysIn[0] + ' ~ ' + (state.month+1) + '/' + daysIn[daysIn.length-1];
+    const item = document.createElement('label');
+    item.className = 'week-item' + (on[i] ? ' on' : '');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = on[i];
+    cb.addEventListener('change', () => { on[i] = cb.checked; render(); });
+    item.appendChild(cb);
+    const span = document.createElement('span');
+    span.textContent = (i+1) + '주차  (' + range + ')';
+    item.appendChild(span);
+    wl.appendChild(item);
+  });
+
+  /* --- 범례: 실제 사용된 표시만 노출 --- */
+  const used = new Set(Object.entries(state.marks)
+    .filter(([k]) => k.startsWith(monthKey() + '-'))
+    .map(([,v]) => v));
+  const legend = document.getElementById('bLegend');
+  legend.innerHTML = '';
+  const order = ['off','allcut','onecut','resume'];
+  const showTypes = order.filter(x => used.has(x));
+  const finalTypes = showTypes.length ? showTypes : order; // 표시 전엔 전체 안내
+  finalTypes.forEach(type => {
+    const div = document.createElement('div');
+    div.className = 'item';
+    div.innerHTML = '<span class="dot ' + type + '"></span> ' + MARK_DEF[type].label;
+    legend.appendChild(div);
+  });
+
+  /* --- 달력 (선택된 주만) --- */
+  const body = document.getElementById('calBody');
+  body.innerHTML = '';
+  weeks.forEach((week, i) => {
+    if(!on[i]) return;
+    const tr = document.createElement('tr');
+    week.forEach((d, dow) => {
+      const td = document.createElement('td');
+      if(d === 0){ td.className = 'empty'; tr.appendChild(td); return; }
+      if(dow === 0) td.classList.add('sun');
+      const st = state.marks[keyOf(d)];
+      if(st) td.classList.add('st-' + st);
+      let html = '<span class="num">' + d + '</span>';
+      if(st) html += '<span class="tag ' + st + '">' + MARK_DEF[st].tag + '</span>';
+      td.innerHTML = html;
+      td.addEventListener('click', () => onDayClick(d));
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+}
+
+/* --- 내보내기 --- */
+async function exportImage(type){
+  const banner = document.getElementById('banner');
+  const canvas = await html2canvas(banner, {
+    scale: 3,
+    useCORS: true,
+    backgroundColor: type === 'jpg' ? '#ffffff' : null,
+  });
+  const mime = type === 'jpg' ? 'image/jpeg' : 'image/png';
+  const url = canvas.toDataURL(mime, 0.95);
+  const fname = state.year + '년' + (state.month+1) + '월_배송달력.' + type;
+
+  // 결과 이미지를 화면에도 표시 (iframe 등 자동 다운로드가 막힌 환경 대비)
+  const img = document.getElementById('resultImg');
+  img.src = url;
+  document.getElementById('resultWrap').style.display = 'block';
+
+  try{
+    const a = document.createElement('a');
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click(); a.remove();
+  }catch(e){ /* 다운로드 차단 시 이미지 우클릭 저장으로 대체 */ }
+}
+document.getElementById('btnPng').addEventListener('click', () => exportImage('png'));
+document.getElementById('btnJpg').addEventListener('click', () => exportImage('jpg'));
+
+document.getElementById('inpTitle').value = (new Date().getMonth()+1) + '월 배송 일정 안내';
+render();
+</script>
+</body>
+</html>
+"""
 
 
 def run_banner():
