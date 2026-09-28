@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-신화 업무 도구 통합 앱  v1.5
+신화 업무 도구 통합 앱  v1.6
  - 거래처원장 비교 (서식 자동 인식 · 일자별 대조)
  - 상품 중량 및 옵션가 자동 생성기
  - 배송 달력 배너 생성기
+
+[v1.6 변경사항]
+ · 달력 표시 모드 정리 — 전지역 배송 마감, 오네지역 배송 마감, 배송 휴무(방문수령·퀵착불), 배송 재개(수량제한) 제거.
+ · 「13시 이전 주문건까지 출고」 모드 추가.
+ · 배송 휴무일은 동그라미 대신 날짜 위에 큰 빨간 X 표시로 강조.
 
 [v1.5 변경사항]
  · 달력 표시 모드 2종 추가 — 「배송 휴무 (방문수령 퀵착불 가능)」, 「배송 재개 (수량제한)」.
@@ -44,7 +49,7 @@ import xlwt
 
 st.set_page_config(page_title="신화 업무 도구", layout="wide")
 
-APP_VERSION = "v1.5"
+APP_VERSION = "v1.6"
 
 # ─────────────────────────────────────────────────────────────
 # 도구 선택
@@ -1229,10 +1234,7 @@ BANNER_HTML = r"""<!DOCTYPE html>
   --accent:#0e3b2e;
   --off:#c0392b; --off-soft:#fdecea;          /* 배송 휴무 */
   --resume:#1f5fbf; --resume-soft:#e8f0fc;    /* 배송 재개 */
-  --allcut:#b45309; --allcut-soft:#fdf0e0;    /* 전지역 배송 마감 */
-  --onecut:#6d28d9; --onecut-soft:#f1eafd;    /* 오네지역 배송 마감 */
-  --offpick:#9a2a1f; --offpick-soft:#fbe9e5;  /* 배송 휴무(방문수령·퀵착불 가능) */
-  --resumelim:#0f766e; --resumelim-soft:#e3f4f1; /* 배송 재개(수량제한) */
+  --cut13:#b45309; --cut13-soft:#fdf0e0;      /* 13시 이전 주문건까지 출고 */
 }
 *{box-sizing:border-box; margin:0; padding:0;}
 body{
@@ -1269,10 +1271,7 @@ input[type=text]:focus, select:focus{outline:2px solid var(--accent); outline-of
 }
 .mode-btn.off.active{border-color:var(--off); background:var(--off-soft); color:var(--off);}
 .mode-btn.resume.active{border-color:var(--resume); background:var(--resume-soft); color:var(--resume);}
-.mode-btn.allcut.active{border-color:var(--allcut); background:var(--allcut-soft); color:var(--allcut);}
-.mode-btn.onecut.active{border-color:var(--onecut); background:var(--onecut-soft); color:var(--onecut);}
-.mode-btn.offpick.active{border-color:var(--offpick); background:var(--offpick-soft); color:var(--offpick);}
-.mode-btn.resumelim.active{border-color:var(--resumelim); background:var(--resumelim-soft); color:var(--resumelim);}
+.mode-btn.cut13.active{border-color:var(--cut13); background:var(--cut13-soft); color:var(--cut13);}
 .mode-btn.erase.active{border-color:#555; background:#f0f0f0; color:#333;}
 .mode-btn small{display:block; font-size:10.5px; font-weight:600; opacity:.8; margin-top:2px;}
 .hint{font-size:12px; color:#999; margin-top:10px; line-height:1.5;}
@@ -1344,12 +1343,12 @@ input[type=text]:focus, select:focus{outline:2px solid var(--accent); outline-of
 }
 .b-legend .item{display:flex; align-items:center; gap:7px;}
 .dot{width:11px; height:11px; border-radius:50%; flex-shrink:0;}
-.dot.off{background:var(--off);}
+.dot.off{background:transparent; width:13px; height:13px; position:relative; border-radius:0;}
+.dot.off::before,.dot.off::after{content:''; position:absolute; left:50%; top:50%; width:15px; height:3px; background:var(--off); border-radius:2px;}
+.dot.off::before{transform:translate(-50%,-50%) rotate(45deg);}
+.dot.off::after{transform:translate(-50%,-50%) rotate(-45deg);}
 .dot.resume{background:transparent; border:2.5px solid var(--resume); width:8px; height:8px;}
-.dot.allcut{background:var(--allcut);}
-.dot.onecut{background:transparent; border:2.5px solid var(--onecut); width:8px; height:8px;}
-.dot.offpick{background:var(--offpick); box-shadow:0 0 0 2px #fff inset;}
-.dot.resumelim{background:var(--resumelim);}
+.dot.cut13{background:var(--cut13);}
 
 .b-cal{padding:26px 44px 8px; background:var(--b-paper);}
 .cal-grid{width:100%; border-collapse:collapse; table-layout:fixed;}
@@ -1371,22 +1370,22 @@ input[type=text]:focus, select:focus{outline:2px solid var(--accent); outline-of
   font-size:16px; font-weight:600; color:var(--b-ink);
 }
 td.sun .num{color:var(--off);}
-td.st-off .num{background:var(--off); color:#fff; font-weight:700;}
+td.st-off .num{color:#fff; font-weight:800; position:relative; z-index:0; text-shadow:0 0 3px var(--off),0 0 3px var(--off),0 0 3px var(--off);}
+td.st-off .num::before,td.st-off .num::after{
+  content:''; position:absolute; left:50%; top:50%; width:48px; height:4.5px;
+  background:var(--off); border-radius:3px; opacity:1; z-index:-1;
+}
+td.st-off .num::before{transform:translate(-50%,-50%) rotate(45deg);}
+td.st-off .num::after{transform:translate(-50%,-50%) rotate(-45deg);}
 td.st-resume .num{border:2.5px solid var(--resume); color:var(--resume); font-weight:700;}
-td.st-allcut .num{background:var(--allcut); color:#fff; font-weight:700;}
-td.st-onecut .num{border:2.5px solid var(--onecut); color:var(--onecut); font-weight:700;}
-td.st-offpick .num{background:var(--offpick); color:#fff; font-weight:700; box-shadow:0 0 0 2px #fff inset;}
-td.st-resumelim .num{background:var(--resumelim); color:#fff; font-weight:700;}
+td.st-cut13 .num{background:var(--cut13); color:#fff; font-weight:700;}
 .tag{
   display:block; font-size:10.5px; font-weight:800; margin-top:4px; letter-spacing:-0.01em;
   line-height:1.2;
 }
 .tag.off{color:var(--off);}
 .tag.resume{color:var(--resume);}
-.tag.allcut{color:var(--allcut);}
-.tag.onecut{color:var(--onecut);}
-.tag.offpick{color:var(--offpick);}
-.tag.resumelim{color:var(--resumelim);}
+.tag.cut13{color:var(--cut13);}
 .tag .sub{display:block; font-size:8.5px; font-weight:700; letter-spacing:-0.03em; margin-top:1px; opacity:.9;}
 
 .b-foot{
@@ -1400,7 +1399,7 @@ td.st-resumelim .num{background:var(--resumelim); color:#fff; font-weight:700;}
 <div class="app">
   <div class="app-head">
     <h1>배송 달력 배너 생성기</h1>
-    <p>날짜를 클릭해 배송 휴무·마감·재개일을 표시하고, 보여줄 주만 골라 PNG/JPG로 내보내세요.</p>
+    <p>날짜를 클릭해 배송 휴무(X)·출고 마감·재개일을 표시하고, 보여줄 주만 골라 PNG/JPG로 내보내세요.</p>
   </div>
 
   <div class="layout">
@@ -1434,11 +1433,8 @@ td.st-resumelim .num{background:var(--resumelim); color:#fff; font-weight:700;}
         <div class="mode-btns">
           <button class="mode-btn off active" data-mode="off">배송 휴무</button>
           <button class="mode-btn resume" data-mode="resume">배송 재개</button>
-          <button class="mode-btn allcut" data-mode="allcut">전지역 배송 마감</button>
-          <button class="mode-btn onecut" data-mode="onecut">오네지역 배송 마감</button>
-          <button class="mode-btn offpick" data-mode="offpick">배송 휴무<small>(방문수령 퀵착불 가능)</small></button>
-          <button class="mode-btn resumelim" data-mode="resumelim">배송 재개<small>(수량제한)</small></button>
-          <button class="mode-btn erase" data-mode="erase" style="grid-column:1/-1">지우기</button>
+          <button class="mode-btn cut13" data-mode="cut13">13시 이전 주문건까지 출고</button>
+          <button class="mode-btn erase" data-mode="erase">지우기</button>
         </div>
         <p class="hint">모드를 선택한 뒤 오른쪽 달력에서 날짜를 클릭하면 표시됩니다. 같은 날짜를 다시 클릭하면 해제됩니다.</p>
       </div>
@@ -1510,10 +1506,7 @@ const THEMES = [
 const MARK_DEF = {
   off:    {label:'배송 휴무',        tag:'배송휴무'},
   resume: {label:'배송 재개일',      tag:'배송재개'},
-  allcut: {label:'전지역 배송 마감', tag:'전지역마감'},
-  onecut: {label:'오네지역 배송 마감', tag:'오네마감'},
-  offpick:   {label:'배송 휴무 (방문수령·퀵착불 가능)', tag:'배송휴무', sub:'방문수령·퀵착불 가능'},
-  resumelim: {label:'배송 재개 (수량제한)',            tag:'배송재개', sub:'수량제한'},
+  cut13:  {label:'13시 이전 주문건까지 출고', tag:'13시 이전 주문', sub:'당일 출고'},
 };
 
 const state = {
@@ -1521,7 +1514,7 @@ const state = {
   month: new Date().getMonth(), // 0-based
   mode: 'off',
   theme: 0,
-  marks: {},        // "YYYY-M-D" -> off|resume|allcut|onecut|offpick|resumelim
+  marks: {},        // "YYYY-M-D" -> off|resume|cut13
   weeksOn: {},      // "YYYY-M" -> [true,...] 주별 표시 여부
 };
 
@@ -1648,7 +1641,7 @@ function render(){
     .map(([,v]) => v));
   const legend = document.getElementById('bLegend');
   legend.innerHTML = '';
-  const order = ['off','offpick','allcut','onecut','resume','resumelim'];
+  const order = ['off','cut13','resume'];
   const showTypes = order.filter(x => used.has(x));
   const finalTypes = showTypes.length ? showTypes : order; // 표시 전엔 전체 안내
   finalTypes.forEach(type => {
@@ -1725,7 +1718,7 @@ def run_banner():
     with st.expander("💡 사용법 / 저장이 안 될 때", expanded=False):
         st.markdown(
             "1. 왼쪽 패널에서 **연·월·테마·문구**를 설정합니다.  \n"
-            "2. **표시 모드**(배송휴무 / 배송재개 / 전지역마감 / 오네마감 / 배송휴무·방문수령 퀵착불 / 배송재개·수량제한 / 지우기)를 "
+            "2. **표시 모드**(배송휴무 / 배송재개 / 13시 이전 주문건까지 출고 / 지우기)를 "
             "고른 뒤 달력의 날짜를 클릭합니다.  \n"
             "3. **PNG 저장 / JPG 저장** 버튼을 누르면 이미지가 만들어집니다.  \n\n"
             "🔸 브라우저 보안 정책 때문에 앱 안(iframe)에서는 자동 다운로드가 "
