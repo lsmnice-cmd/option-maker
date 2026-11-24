@@ -1,14 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-신화 업무 도구 통합 앱  v1.6
+신화 업무 도구 통합 앱  v1.7
  - 거래처원장 비교 (서식 자동 인식 · 일자별 대조)
  - 상품 중량 및 옵션가 자동 생성기
  - 배송 달력 배너 생성기
 
+[v1.7 변경사항]
+ · 옵션가 생성기: 메인 상품 파일 + 추가상품(supplementProduct) 파일을 **함께 업로드**해
+   같은 기준가로 한 번에 계산·검산·다운로드. (살치살 48,000원 기준 → 추가상품 차액 자동 반영)
+ · 메인 파일에서 기준가 자동 감지 (옵션가 0인 행 = 중량×단가 → 기준가).
+ · 파일별 탭에서 품목 선택·단가·옵션명·중량 추가를 각각 처리, 되돌리기도 파일별.
+ · 실행 시 같은 폴더의 구버전 신화업무도구_v*.py 를 '구파일' 폴더로 자동 정리.
+
 [v1.6 변경사항]
- · 달력 표시 모드 정리 — 전지역 배송 마감, 오네지역 배송 마감, 배송 휴무(방문수령·퀵착불), 배송 재개(수량제한) 제거.
- · 「13시 이전 주문건까지 출고」 모드 추가.
- · 배송 휴무일은 동그라미 대신 날짜 위에 큰 빨간 X 표시로 강조.
+ · 달력 표시 모드 정리 — 전지역/오네지역 마감, 방문수령 휴무, 수량제한 재개 제거.
+ · 「13시 이전 주문건까지 출고」 모드 추가. 배송 휴무일은 큰 빨간 X 표시.
 
 [v1.5 변경사항]
  · 달력 표시 모드 2종 추가 — 「배송 휴무 (방문수령 퀵착불 가능)」, 「배송 재개 (수량제한)」.
@@ -46,10 +52,34 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 import xlwt
+import os
+import shutil
+import sys
+
+APP_VERSION = "v1.7"
+
+
+def _archive_old_versions():
+    """같은 폴더의 구버전 신화업무도구_v*.py 를 '구파일' 폴더로 옮긴다. (설정·데이터 파일은 건드리지 않음)"""
+    try:
+        me_path = os.path.abspath(__file__)
+        here, me = os.path.dirname(me_path), os.path.basename(me_path)
+        old_dir = os.path.join(here, "구파일")
+        for fn in os.listdir(here):
+            m = re.match(r"신화업무도구_v(\d+(?:\.\d+)*)\.py$", fn)
+            if not m or fn == me:
+                continue
+            if "v" + m.group(1) == APP_VERSION:      # 현재 버전과 같은 파일은 절대 건드리지 않음
+                continue
+            os.makedirs(old_dir, exist_ok=True)
+            shutil.move(os.path.join(here, fn), os.path.join(old_dir, fn))
+    except Exception:
+        pass
+
+
+_archive_old_versions()
 
 st.set_page_config(page_title="신화 업무 도구", layout="wide")
-
-APP_VERSION = "v1.6"
 
 # ─────────────────────────────────────────────────────────────
 # 도구 선택
@@ -87,8 +117,8 @@ if st.session_state.tool is None:
     with c2:
         st.subheader("⚖️ 상품 중량 및 옵션가 자동 생성기")
         st.write(
-            "기준가와 단가를 입력해 중량별 옵션가를 자동 계산합니다.  \n"
-            "**기준가를 바꾸면 전 품목 옵션가가 한 번에 다시 계산됩니다.**"
+            "메인 상품 + 추가상품 파일을 함께 올려 **같은 기준가**로 계산합니다.  \n"
+            "기준가를 바꾸면 두 파일 전체 옵션가가 한 번에 다시 계산됩니다."
         )
         if st.button("옵션가 생성기 열기", type="primary", use_container_width=True):
             st.session_state.tool = "option"
@@ -648,7 +678,7 @@ def run_ledger():
 
 
 # ═════════════════════════════════════════════════════════════
-# 도구 2 — 상품 중량 및 옵션가 자동 생성기
+# 도구 2 — 상품 중량 및 옵션가 자동 생성기  (v1.7: 메인 상품 + 추가상품 동시 처리)
 # ═════════════════════════════════════════════════════════════
 def naver_to_internal(df_naver):
     rows = []
@@ -675,9 +705,9 @@ def internal_to_naver(df_internal, col_item_name, col_weight_name):
     })
 
 
-# ── 공통 계산 유틸 (v1.1) ────────────────────────────────────
+# ── 공통 계산 유틸 ───────────────────────────────────────────
 def extract_num(text):
-    """문자열에서 첫 번째 숫자를 실수로 뽑아낸다. (예: '팩 2.5kg' → 2.5)"""
+    """문자열에서 첫 번째 숫자를 실수로 뽑아낸다. (예: '원육2.99kg' → 2.99)"""
     m = re.search(r'(\d+\.?\d*)', str(text))
     return float(m.group(1)) if m else 0.0
 
@@ -685,14 +715,13 @@ def extract_num(text):
 def extract_unit_price(item_name, file_format):
     """
     품목명에 적힌 kg당 단가를 읽어낸다.
-      · 네이버 서식 : '...kg13500' 형태
-      · 표준 서식   : '...13,500원' 형태
+      · 네이버 서식 : '...kg39500' 형태
+      · 표준 서식   : '...48000원' / '48,000원' 형태
     → (단가, 품목명에서 매칭된 문자열).  못 찾으면 (None, "")
     """
     name = str(item_name)
     naver_m = re.search(r'kg\s*(\d{3,})', name)
     std_m = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)원', name)
-
     if file_format == 'naver' and naver_m:
         return int(naver_m.group(1)), naver_m.group(0)
     if std_m:
@@ -709,39 +738,28 @@ def calc_option_price(weight, unit_price, base_price):
 
 def resolve_name_and_price(edited_name, origin_price, popover_price, file_format):
     """
-    사용자가 고친 옵션명과 단가 입력창 값을 종합해 '최종 옵션명 / 적용 단가'를 정한다. (v1.2)
-
+    고친 옵션명과 단가 입력창 값을 종합해 '최종 옵션명 / 적용 단가'를 정한다.
       1) 옵션명 안의 단가 표기를 직접 고친 경우 → 그 값을 단가로 채택 (옵션명 우선)
       2) 그 외에는 단가 입력창 값을 채택하고, 옵션명의 단가 표기를 새 값으로 자동 치환
-    → (최종 옵션명, 적용 단가, 어디서 온 단가인지 설명)
     """
     edited_name = str(edited_name).strip()
     name_price, name_str = extract_unit_price(edited_name, file_format)
-
     if name_price is not None and origin_price is not None and name_price != origin_price:
         return edited_name, name_price, "옵션명에 적으신 단가"
-
     if name_price is not None and name_str:
         new_str = (f"kg{popover_price}" if name_str.lower().startswith("kg")
                    else f"{popover_price}원")
         return edited_name.replace(name_str, new_str), popover_price, "단가 입력창"
-
     return edited_name, popover_price, "단가 입력창 (옵션명에는 단가 표기가 없음)"
 
 
 def recalc_all_options(df, col_item, col_weight, base_price, file_format):
-    """
-    파일 안의 모든 행을 현재 기준가로 다시 계산한다.
-    품목명에서 단가를 못 읽은 행은 손대지 않고 그대로 둔다.
-    → (재계산된 df, 값이 바뀐 행 수, 단가를 못 읽은 품목명 목록)
-    """
+    """파일 안의 모든 행을 현재 기준가로 다시 계산. 단가를 못 읽은 행은 그대로 둔다."""
     out = df.copy()
     if '옵션가' not in out.columns:
         out['옵션가'] = 0
-
     old = pd.to_numeric(out['옵션가'], errors='coerce')
     new_vals, skipped = [], []
-
     for idx, row in out.iterrows():
         unit, _ = extract_unit_price(row[col_item], file_format)
         if unit is None:
@@ -750,9 +768,7 @@ def recalc_all_options(df, col_item, col_weight, base_price, file_format):
             if nm not in skipped:
                 skipped.append(nm)
             continue
-        new_vals.append(calc_option_price(extract_num(row[col_weight]),
-                                          unit, base_price))
-
+        new_vals.append(calc_option_price(extract_num(row[col_weight]), unit, base_price))
     out['옵션가'] = new_vals
     changed = int((old.fillna(-10 ** 9).astype(float)
                    != pd.Series(new_vals, index=out.index).astype(float)).sum())
@@ -760,7 +776,7 @@ def recalc_all_options(df, col_item, col_weight, base_price, file_format):
 
 
 def count_mismatch(df, col_item, col_weight, base_price, file_format):
-    """현재 기준가 기준으로 계산했을 때 옵션가가 어긋나는 행 수를 센다."""
+    """현재 기준가로 계산했을 때 옵션가가 어긋나는 행 수."""
     if df is None or df.empty:
         return 0
     bad = 0
@@ -776,445 +792,454 @@ def count_mismatch(df, col_item, col_weight, base_price, file_format):
     return bad
 
 
-def run_option():
-    ss = st.session_state
-    ss.setdefault('processed_data', None)
-    ss.setdefault('last_file_id', None)
-    ss.setdefault('col_item_name', None)
-    ss.setdefault('col_weight_name', None)
-    ss.setdefault('history', [])
-    ss.setdefault('global_base_price', 0)
-    ss.setdefault('last_selected_item', None)
-    ss.setdefault('reset_counter', 0)
-    ss.setdefault('file_format', None)
-    ss.setdefault('applied_base_price', None)      # v1.1 — 실제로 적용된 기준가
-    ss.setdefault('auto_recalc', True)             # v1.1 — 자동 재계산 여부
+def detect_base_price(df, col_item, col_weight, file_format):
+    """
+    메인 상품 파일에서 기준가를 추정한다.
+    옵션가가 0인 행은 '중량 × 단가 = 기준가' 이므로, 그런 행에서 역산한 값 중 가장 많은 값을 돌려준다.
+    → (기준가, 근거 품목명) / 못 찾으면 (None, "")
+    """
+    if df is None or df.empty or '옵션가' not in df.columns:
+        return None, ""
+    cand = {}
+    for _, row in df.iterrows():
+        opt = pd.to_numeric(row['옵션가'], errors='coerce')
+        if pd.isna(opt) or int(opt) != 0:
+            continue
+        unit, _ = extract_unit_price(row[col_item], file_format)
+        w = extract_num(row[col_weight])
+        if unit is None or w <= 0:
+            continue
+        bp = int(round(w * unit / 10) * 10)
+        cand.setdefault(bp, []).append(str(row[col_item]))
+    if not cand:
+        return None, ""
+    bp = max(cand, key=lambda k: len(cand[k]))
+    return bp, cand[bp][0]
 
-    st.title("⚖️ 상품 중량 및 옵션가 자동 생성기")
-    st.caption("다중 품목 지원 · 네이버 추가상품 서식 자동 인식 · "
-               "기준가 변경 시 전 품목 일괄 재계산")
 
-    uploaded_file = st.file_uploader(
-        "기존 양식 파일(xls, xlsx, csv) 또는 네이버 추가상품 파일을 업로드하세요",
-        type=['xls', 'xlsx', 'csv'], key="opt_file")
+# ── 작업 공간(파일 슬롯) ─────────────────────────────────────
+SLOT_META = {
+    'main': {'title': '메인 상품 파일', 'icon': '🥩',
+             'hint': '살치살 등 본 상품 옵션 파일 (품목·중량·옵션가 / 네이버 서식 모두 가능)'},
+    'supp': {'title': '추가상품 파일', 'icon': '➕',
+             'hint': '네이버 추가상품(supplementProduct) 파일 — 메인 상품 1개 구매를 전제로 한 옵션'},
+}
 
-    if uploaded_file:
-        current_file_id = getattr(uploaded_file, 'file_id',
-                                  uploaded_file.name + str(uploaded_file.size))
-        if ss.last_file_id != current_file_id:
+
+def new_workspace():
+    return dict(processed_data=None, last_file_id=None, col_item=None, col_weight=None,
+                history=[], last_selected_item=None, reset_counter=0, file_format=None,
+                applied_base_price=None, src_name='')
+
+
+def load_option_file(uploaded_file):
+    """업로드 파일 → (df, 품목열, 중량열, 서식코드).  실패 시 ValueError."""
+    if uploaded_file.name.endswith('.csv'):
+        file_bytes = uploaded_file.read()
+        df = None
+        for enc in ['utf-8', 'cp949', 'euc-kr', 'utf-8-sig']:
             try:
-                for key in ['base_price', 'global_base_price_input']:
-                    if key in ss:
-                        del ss[key]
-                ss.global_base_price = 0
-                ss.applied_base_price = None
-                ss.last_selected_item = None
-                ss.reset_counter += 1
+                df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
+                df.columns = df.columns.str.strip()
+                if ('품목 및 등급' in df.columns or '품목' in df.columns
+                        or '추가상품명' in df.columns):
+                    break
+            except Exception:
+                continue
+    else:
+        engine = 'xlrd' if uploaded_file.name.endswith('.xls') else 'openpyxl'
+        df = pd.read_excel(uploaded_file, engine=engine)
+        df.columns = df.columns.str.strip()
+    if df is None:
+        raise ValueError("파일을 제대로 읽지 못했습니다.")
 
-                if uploaded_file.name.endswith('.csv'):
-                    file_bytes = uploaded_file.read()
-                    df = None
-                    for enc in ['utf-8', 'cp949', 'euc-kr', 'utf-8-sig']:
-                        try:
-                            df = pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
-                            df.columns = df.columns.str.strip()
-                            if ('품목 및 등급' in df.columns or '품목' in df.columns
-                                    or '추가상품명' in df.columns):
-                                break
-                        except Exception:
-                            continue
-                else:
-                    engine = 'xlrd' if uploaded_file.name.endswith('.xls') else 'openpyxl'
-                    df = pd.read_excel(uploaded_file, engine=engine)
-                    df.columns = df.columns.str.strip()
-
-                if df is None:
-                    st.error("파일을 제대로 읽지 못했습니다.")
-                    st.stop()
-
-                if '추가상품명' in df.columns and '추가상품값' in df.columns:
-                    ss.file_format = 'naver'
-                    df = naver_to_internal(df)
-                    col_name, col_weight = '품목', '중량'
-                    st.info("📌 네이버 추가상품 서식으로 인식했습니다. "
-                            "내부 변환 후 처리하며, 다운로드 시 네이버 서식으로 저장됩니다.")
-                else:
-                    ss.file_format = 'standard'
-                    if '품목 및 등급' in df.columns:
-                        col_name = '품목 및 등급'
-                    elif '품목' in df.columns:
-                        col_name = '품목'
-                    else:
-                        st.error("'품목 및 등급', '품목', 또는 '추가상품명' 열(A열)을 찾을 수 없습니다.")
-                        st.stop()
-
-                    if '중량' in df.columns:
-                        col_weight = '중량'
-                    elif '포장&중량' in df.columns:
-                        col_weight = '포장&중량'
-                    else:
-                        st.error("'중량' 또는 '포장&중량' 열(B열)을 찾을 수 없습니다.")
-                        st.stop()
-
-                df['__sort_1'] = range(len(df))
-                df['__sort_2'] = 0.0
-                ss.col_item_name = col_name
-                ss.col_weight_name = col_weight
-                ss.processed_data = df.copy()
-                ss.last_file_id = current_file_id
-                ss.history = []
-                st.success("파일이 성공적으로 로드되었습니다! 아래에서 기준가를 먼저 입력해주세요.")
-            except Exception as e:
-                st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
-                st.stop()
-
-    if ss.processed_data is None:
-        st.info("👆 파일을 업로드하면 작업을 시작할 수 있습니다.")
-        return
-
-    st.markdown("---")
-    st.subheader("⚡ 기준가 설정 (필수)")
-    col_bp1, col_bp2 = st.columns([2, 3])
-    with col_bp1:
-        entered_base_price = st.number_input("🚨 기준가(원)를 입력하세요", min_value=0,
-                                             value=ss.global_base_price, step=100,
-                                             key="global_base_price_input")
-    with col_bp2:
-        if entered_base_price > 0:
-            st.success(f"✅ 기준가 **{entered_base_price:,}원** 이 설정되었습니다. "
-                       "아래에서 품목별 작업을 진행하세요.")
+    if '추가상품명' in df.columns and '추가상품값' in df.columns:
+        fmt = 'naver'
+        df = naver_to_internal(df)
+        col_name, col_weight = '품목', '중량'
+    else:
+        fmt = 'standard'
+        if '품목 및 등급' in df.columns:
+            col_name = '품목 및 등급'
+        elif '품목' in df.columns:
+            col_name = '품목'
         else:
-            st.warning("⚠️ 기준가를 입력해야 이후 작업을 진행할 수 있습니다.")
+            raise ValueError("'품목 및 등급', '품목', 또는 '추가상품명' 열(A열)을 찾을 수 없습니다.")
+        if '중량' in df.columns:
+            col_weight = '중량'
+        elif '포장&중량' in df.columns:
+            col_weight = '포장&중량'
+        else:
+            raise ValueError("'중량' 또는 '포장&중량' 열(B열)을 찾을 수 없습니다.")
+    if '옵션가' not in df.columns:
+        df['옵션가'] = 0
+    if '재고수량' not in df.columns:
+        df['재고수량'] = 1
+    df['__sort_1'] = range(len(df))
+    df['__sort_2'] = 0.0
+    return df, col_name, col_weight, fmt
 
-    ss.global_base_price = entered_base_price
-    if ss.global_base_price == 0:
-        st.info("👆 기준가를 입력하면 품목 선택 및 중량 관리 기능이 활성화됩니다.")
-        return
 
-    col_item_name = ss.col_item_name
-    col_weight_name = ss.col_weight_name
+def handle_upload(slot, uploaded_file):
+    """슬롯별 업로더 처리. 새 파일이면 작업 공간을 초기화해 로드한다. → 새 파일 여부"""
+    ws = st.session_state.opt_ws[slot]
+    if uploaded_file is None:
+        return False
+    fid = getattr(uploaded_file, 'file_id', uploaded_file.name + str(uploaded_file.size))
+    if ws['last_file_id'] == fid:
+        return False
+    df, col_name, col_weight, fmt = load_option_file(uploaded_file)
+    ws.update(processed_data=df, col_item=col_name, col_weight=col_weight, file_format=fmt,
+              last_file_id=fid, history=[], last_selected_item=None,
+              applied_base_price=None, src_name=uploaded_file.name)
+    ws['reset_counter'] += 1
+    return True
 
-    # ── v1.1 : 기준가 변경 시 전 품목 옵션가 일괄 재계산 ─────────
-    st.markdown("##### 🔁 기준가 일괄 반영")
-    r1, r2 = st.columns([3, 1])
-    with r1:
-        ss.auto_recalc = st.checkbox(
-            "기준가를 바꾸면 **파일 안 모든 품목·모든 중량**의 옵션가를 자동으로 다시 계산합니다 "
-            "(품목명에 적힌 kg단가 기준)",
-            value=ss.auto_recalc, key="auto_recalc_cb")
-    with r2:
-        manual_recalc = st.button("🔁 지금 전체 다시 계산", use_container_width=True)
 
-    auto_trigger = (ss.auto_recalc
-                    and ss.applied_base_price != ss.global_base_price)
+def _split_pattern(sample, default_suffix="kg"):
+    """'원육2.99kg\\n(추가옵션필수구매)' → ('원육', 'kg\\n(추가옵션필수구매)')"""
+    s = str(sample)
+    m = re.search(r'(\d+\.?\d*)', s)
+    if m:
+        return s[:m.start()], s[m.end():]
+    return "", default_suffix
 
-    if manual_recalc or auto_trigger:
-        ss.history.append(ss.processed_data.copy())
+
+def apply_item_change(ws, selected_item, new_item_name, new_price, base_price, weight_input,
+                      add_weights):
+    """선택 품목에 단가/옵션명 적용 + (선택) 새 중량 행 추가. ws['processed_data']를 갱신."""
+    df = ws['processed_data']
+    col_item, col_weight = ws['col_item'], ws['col_weight']
+    ws['history'].append(df.copy())
+
+    item_rows = df[df[col_item] == selected_item].copy()
+    sample_b = item_rows[col_weight].iloc[0] if len(item_rows) else "0kg"
+    prefix, suffix = _split_pattern(sample_b)
+    sample_e = (item_rows['관리코드'].iloc[0]
+                if len(item_rows) and '관리코드' in item_rows.columns else "0kg")
+    prefix_e, suffix_e = _split_pattern(sample_e)
+    base_sort_1 = item_rows['__sort_1'].min() if not item_rows.empty else df['__sort_1'].max() + 1
+
+    item_rows['재고수량'] = pd.to_numeric(item_rows['재고수량'], errors='coerce').fillna(0)
+    item_rows = item_rows[item_rows['재고수량'] > 0]
+
+    if not item_rows.empty:
+        item_rows['numeric_weight'] = item_rows[col_weight].apply(extract_num)
+        item_rows['옵션가'] = item_rows['numeric_weight'].apply(
+            lambda w: calc_option_price(w, new_price, base_price))
+        item_rows[col_item] = new_item_name
+        item_rows['__sort_1'] = base_sort_1
+        item_rows['__sort_2'] = item_rows['numeric_weight']
+
+    new_rows = []
+    if add_weights:
+        for w_str in str(weight_input).replace(',', '\n').split('\n'):
+            w_str = w_str.strip()
+            m = re.search(r'(\d+\.?\d*)', w_str)
+            if not w_str or not m:
+                continue
+            w_txt, w_num = m.group(1), float(m.group(1))
+            new_rows.append({
+                col_item: new_item_name,
+                col_weight: f"{prefix}{w_txt}{suffix}",
+                "옵션가": calc_option_price(w_num, new_price, base_price),
+                "재고수량": 1.0,
+                "관리코드": f"{prefix_e}{w_txt}{suffix_e}",
+                "사용여부": "Y",
+                "numeric_weight": w_num,
+                "__sort_1": base_sort_1,
+                "__sort_2": w_num,
+            })
+    new_df = pd.DataFrame(new_rows)
+    combined = pd.concat([item_rows, new_df], ignore_index=True) if not new_df.empty else item_rows
+    combined = combined.drop(columns=['numeric_weight'], errors='ignore')
+
+    final = pd.concat([df[df[col_item] != selected_item], combined], ignore_index=True)
+    final['재고수량'] = pd.to_numeric(final['재고수량'], errors='coerce').fillna(0)
+    group_cols = [col_item, col_weight, '옵션가']
+    agg = {'재고수량': 'sum'}
+    for c in final.columns:
+        if c not in group_cols and c != '재고수량':
+            agg[c] = 'first'
+    final = final.groupby(group_cols, as_index=False).agg(agg)
+    final = final.sort_values(by=['__sort_1', '__sort_2']).reset_index(drop=True)
+    ws['processed_data'] = final
+    ws['reset_counter'] += 1
+    return len(new_rows)
+
+
+def render_recalc(slot, ws, base_price, auto):
+    """기준가 변경 시 슬롯 전체 재계산 (자동/수동)."""
+    meta = SLOT_META[slot]
+    trigger = auto and ws['applied_base_price'] != base_price
+    manual = st.button(f"🔁 {meta['title']} 전체 다시 계산", key=f"recalc_{slot}",
+                       use_container_width=True)
+    if manual or trigger:
+        ws['history'].append(ws['processed_data'].copy())
         new_df, changed, skipped = recalc_all_options(
-            ss.processed_data, col_item_name, col_weight_name,
-            ss.global_base_price, ss.file_format)
-        ss.processed_data = new_df
-        ss.applied_base_price = ss.global_base_price
+            ws['processed_data'], ws['col_item'], ws['col_weight'], base_price, ws['file_format'])
+        ws['processed_data'] = new_df
+        ws['applied_base_price'] = base_price
+        st.success(f"✅ {meta['icon']} {meta['title']}: 기준가 **{base_price:,}원** 기준으로 "
+                   f"{len(new_df):,}행 재계산 (값이 바뀐 행 **{changed:,}건**)")
+        real_skipped = [n for n in skipped if '추가상품' not in n]
+        if real_skipped:
+            head = " / ".join(real_skipped[:4])
+            more = f" 외 {len(real_skipped) - 4}개" if len(real_skipped) > 4 else ""
+            st.warning(f"⚠️ 품목명에서 kg단가를 읽지 못해 건드리지 않은 품목: {head}{more}")
 
-        st.success(
-            f"✅ 기준가 **{ss.global_base_price:,}원** 기준으로 전체 "
-            f"**{len(new_df):,}행**을 다시 계산했습니다. "
-            f"(값이 바뀐 행 **{changed:,}건**)  \n"
-            "계산식: `옵션가 = (중량 × 품목명의 kg단가 − 기준가)` · 10원 단위 절삭"
-        )
-        if skipped:
-            head = " / ".join(skipped[:5])
-            more = f" 외 {len(skipped) - 5}개" if len(skipped) > 5 else ""
-            st.warning(
-                f"⚠️ 품목명에서 kg단가를 읽지 못해 **건드리지 않은 품목**이 있습니다: "
-                f"{head}{more}  \n"
-                "해당 품목은 아래에서 직접 선택해 단가를 입력한 뒤 적용해 주세요."
-            )
 
-    df = ss.processed_data
+def render_item_editor(slot, ws, base_price):
+    """품목 선택 → 단가 → 옵션명 → 중량 추가 → 적용 (슬롯별 독립 동작)."""
+    meta = SLOT_META[slot]
+    df = ws['processed_data']
+    col_item, col_weight = ws['col_item'], ws['col_weight']
+    k = lambda name: f"{slot}_{name}_{ws['reset_counter']}"   # 위젯 키
 
-    st.markdown("---")
-    col_title, col_undo = st.columns([3, 1])
-    with col_title:
-        fmt_label = "네이버 추가상품" if ss.file_format == 'naver' else "기존 표준"
-        st.subheader(f"1. 수정할 품목 선택 및 단가 설정  ({fmt_label} 서식)")
-    with col_undo:
-        if st.button("⏪ 방금 한 작업 되돌리기 (Undo)", disabled=not ss.history):
-            ss.processed_data = ss.history.pop()
-            ss.applied_base_price = None      # 되돌린 뒤 재계산 상태 초기화
-            st.success("이전 상태로 되돌렸습니다!")
+    head, undo = st.columns([3, 1])
+    with head:
+        fmt_label = "네이버 추가상품" if ws['file_format'] == 'naver' else "기존 표준"
+        st.markdown(f"#### {meta['icon']} {meta['title']} — 품목별 작업  "
+                    f"<span style='font-size:0.8em;color:#888'>({fmt_label} 서식 · "
+                    f"{ws['src_name']})</span>", unsafe_allow_html=True)
+    with undo:
+        if st.button("⏪ 되돌리기", key=f"undo_{slot}", disabled=not ws['history'],
+                     use_container_width=True):
+            ws['processed_data'] = ws['history'].pop()
+            ws['applied_base_price'] = None
+            ws['reset_counter'] += 1
             st.rerun()
 
-    unique_items = df[col_item_name].dropna().unique()
-    selected_item = st.selectbox(f"A열({col_item_name})에서 수정할 항목을 선택하세요", unique_items)
+    unique_items = df[col_item].dropna().unique()
+    selected_item = st.selectbox("수정할 품목", unique_items, key=f"{slot}_sel")
+    if ws['last_selected_item'] != selected_item:
+        ws['reset_counter'] += 1
+        ws['last_selected_item'] = selected_item
 
-    if ss.get('last_selected_item') != selected_item:
-        ss.reset_counter += 1
-        ss.last_selected_item = selected_item
-
-    current_price, original_price_str = extract_unit_price(selected_item, ss.file_format)
+    current_price, _ = extract_unit_price(selected_item, ws['file_format'])
     if current_price is None:
-        current_price, original_price_str = 0, ""
-        st.warning("⚠️ 선택하신 품목명에서 기준단가를 찾을 수 없습니다. "
-                   "아래 팝업창에서 단가를 직접 입력해 주세요!")
+        current_price = 0
+        st.warning("⚠️ 품목명에서 kg단가를 찾을 수 없습니다. 아래에 단가를 직접 입력해 주세요.")
 
-    st.markdown("##### ⚙️ 단가 설정")
     p1, p2 = st.columns([1, 3])
     with p1:
-        new_price = st.number_input("단가(원) — 바꾸면 바로 반영됩니다", min_value=0,
-                                    value=int(current_price), step=100,
-                                    key=f"unit_price_{ss.reset_counter}")
+        new_price = st.number_input("kg단가(원)", min_value=0, value=int(current_price),
+                                    step=100, key=k('unit'))
     with p2:
-        base_price = ss.global_base_price
         st.markdown("<br>", unsafe_allow_html=True)
-        st.info(
-            f"**계산 공식:** (중량 × 단가 **{new_price:,}**원) − 기준가 "
-            f"**{base_price:,}**원  \n"
-            f"👉 **예시:** 1.0kg → **{calc_option_price(1.0, new_price, base_price):,}원** · "
-            f"3.0kg → **{calc_option_price(3.0, new_price, base_price):,}원** · "
-            f"5.0kg → **{calc_option_price(5.0, new_price, base_price):,}원**"
-        )
+        st.info(f"**계산:** (중량 × 단가 **{new_price:,}**) − 기준가 **{base_price:,}**  →  "
+                f"1kg **{calc_option_price(1.0, new_price, base_price):,}원** · "
+                f"3kg **{calc_option_price(3.0, new_price, base_price):,}원** · "
+                f"5kg **{calc_option_price(5.0, new_price, base_price):,}원**")
 
-    # ── v1.2 : 옵션명 직접 수정 ──────────────────────────────
-    st.markdown("##### ✏️ 옵션명 수정")
     n1, n2 = st.columns([3, 1])
     with n1:
-        edited_name = st.text_input(
-            "옵션명(품목명)을 직접 고쳐 쓰실 수 있습니다. 아래 적용 버튼을 누르면 반영됩니다.",
-            value=str(selected_item),
-            key=f"item_name_edit_{ss.reset_counter}")
+        edited_name = st.text_input("옵션명(품목명) — 고쳐 쓰면 적용 시 반영", value=str(selected_item),
+                                    key=k('name'))
     with n2:
         st.markdown("<br>", unsafe_allow_html=True)
-        btn_rename_only = st.button("✏️ 옵션명만 바꾸기", use_container_width=True)
+        btn_rename = st.button("✏️ 옵션명만 바꾸기", key=f"rename_{slot}", use_container_width=True)
 
-    final_item_name, apply_price, price_src = resolve_name_and_price(
-        edited_name, current_price, new_price, ss.file_format)
+    final_name, apply_price, src = resolve_name_and_price(
+        edited_name, current_price, new_price, ws['file_format'])
+    if final_name != str(selected_item) or apply_price != current_price:
+        st.caption(f"적용될 옵션명 → **{final_name}** · 적용 단가 → **{apply_price:,}원** ({src})")
 
-    if final_item_name != str(selected_item) or apply_price != current_price:
-        st.info(f"적용될 옵션명 → **{final_item_name}**  \n"
-                f"적용될 단가 → **{apply_price:,}원** ({price_src} 기준)")
-
-    with st.expander("🔤 전 품목 옵션명 일괄 찾아 바꾸기"):
-        f1, f2, f3 = st.columns([2, 2, 1])
-        find_txt = f1.text_input("찾을 문구", key="rename_find")
-        repl_txt = f2.text_input("바꿀 문구", key="rename_repl")
-        f3.markdown("<br>", unsafe_allow_html=True)
-        do_replace = f3.button("전체 바꾸기", use_container_width=True)
-        hit = (df[col_item_name].astype(str)
-               .str.contains(find_txt, regex=False).sum()) if find_txt else 0
-        st.caption(f"현재 '{find_txt}' 가 들어간 행: **{hit:,}건**" if find_txt
-                   else "찾을 문구를 입력하면 몇 건이 바뀌는지 미리 알려 드립니다. "
-                        "단가 표기를 바꾸신 경우에는 위의 [🔁 지금 전체 다시 계산]을 "
-                        "한 번 눌러 옵션가를 맞춰 주세요.")
-        if do_replace and find_txt:
-            ss.history.append(df.copy())
+    if btn_rename:
+        if final_name and final_name != str(selected_item):
+            ws['history'].append(df.copy())
             new_df = df.copy()
-            new_df[col_item_name] = (new_df[col_item_name].astype(str)
-                                     .str.replace(find_txt, repl_txt, regex=False))
-            ss.processed_data = new_df
-            st.success(f"✅ {hit:,}건의 옵션명을 바꿨습니다.")
+            mask = new_df[col_item] == selected_item
+            new_df.loc[mask, col_item] = final_name
+            ws['processed_data'] = new_df
+            ws['last_selected_item'] = final_name
+            ws['reset_counter'] += 1
+            st.rerun()
+        else:
+            st.warning("옵션명이 그대로입니다.")
+
+    rows = df[df[col_item] == selected_item].copy()
+    rows['재고수량'] = pd.to_numeric(rows['재고수량'], errors='coerce').fillna(0)
+    existing = rows[rows['재고수량'] > 0][col_weight].astype(str).str.replace('\n', ' ').tolist()
+
+    w1, w2 = st.columns(2)
+    with w1:
+        st.markdown(f"**기존 {col_weight} ({len(existing)}개, 재고 0 제외)**")
+        st.text_area("참고용", value="\n".join(existing), height=160, disabled=True, key=k('ex'))
+    with w2:
+        st.markdown("**새로 추가할 중량**")
+        weight_input = st.text_area("숫자만 줄바꿈 또는 쉼표로 (예: 2.85 / 3.1 / 3.42)",
+                                    height=160, key=k('win'),
+                                    placeholder="2.85\n3.1\n3.42")
+
+    b1, b2 = st.columns(2)
+    only_price = b1.button("👉 중량 추가 없이 [단가/옵션명만 적용]", key=f"only_{slot}",
+                           use_container_width=True)
+    add_w = b2.button("👉 새 중량 추가하고 [단가/옵션명 적용]", key=f"add_{slot}",
+                      type="primary", use_container_width=True)
+    if only_price or add_w:
+        if add_w and not weight_input.strip():
+            st.error("추가할 중량을 입력해 주세요.")
+        else:
+            n = apply_item_change(ws, selected_item, final_name or str(selected_item),
+                                  apply_price, base_price, weight_input, add_w)
+            ws['applied_base_price'] = base_price
+            st.success(f"✅ '{final_name}' 적용 완료" + (f" · 새 중량 {n}개 추가" if add_w else ""))
             st.rerun()
 
-    if btn_rename_only:
-        if not final_item_name:
-            st.error("🚨 옵션명이 비어 있습니다.")
-        elif final_item_name == str(selected_item):
-            st.warning("옵션명이 그대로입니다. 바꿀 내용이 없습니다.")
-        else:
-            ss.history.append(df.copy())
-            new_df = df.copy()
-            mask = new_df[col_item_name] == selected_item
-            new_df.loc[mask, col_item_name] = final_item_name
-            ss.processed_data = new_df
-            ss.last_selected_item = final_item_name
-            st.success(f"✅ 옵션명을 '{final_item_name}' 로 바꿨습니다. "
-                       f"({int(mask.sum()):,}행) · 옵션가는 그대로 두었습니다.")
-            st.rerun()
 
-    st.markdown("---")
-    st.subheader(f"2. {col_weight_name} 관리")
+def build_xls_bytes(export_df):
+    wb = xlwt.Workbook(encoding='utf-8')
+    ws = wb.add_sheet('Sheet1')
+    for ci, cname in enumerate(export_df.columns.tolist()):
+        ws.write(0, ci, str(cname))
+    for ri, row in enumerate(export_df.values):
+        for ci, val in enumerate(row):
+            if pd.isna(val):
+                val = ""
+            elif not isinstance(val, (int, float)):
+                val = str(val)
+            ws.write(ri + 1, ci, val)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
-    item_rows_for_list = df[df[col_item_name] == selected_item].copy()
-    if '재고수량' in item_rows_for_list.columns:
-        item_rows_for_list['재고수량'] = pd.to_numeric(
-            item_rows_for_list['재고수량'], errors='coerce').fillna(0)
-        existing_stock = item_rows_for_list[item_rows_for_list['재고수량'] > 0]
-    else:
-        existing_stock = item_rows_for_list
 
-    existing_weights_list = existing_stock[col_weight_name].astype(str).tolist()
-
-    col_w1, col_w2 = st.columns(2)
-    with col_w1:
-        st.markdown(f"**기존 {col_weight_name} 리스트 (재고 0 제외)**")
-        st.text_area("참고용입니다 (이곳에서 수정 불가)",
-                     value="\n".join(existing_weights_list), height=200, disabled=True)
-    with col_w2:
-        st.markdown(f"**새로운 {col_weight_name} 리스트 추가**")
-        weight_input = st.text_area("추가할 중량만 줄바꿈(Enter)으로 입력하세요.",
-                                    height=200, key=f"weight_input_{ss.reset_counter}")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        btn_only_price = st.button("👉 새 중량 추가 없이 [단가/기준가만 일괄 변경]",
-                                   use_container_width=True)
-    with col_btn2:
-        btn_add_weights = st.button("👉 새 중량 추가하고 [단가/기준가 일괄 변경]",
-                                    type="primary", use_container_width=True)
-
-    if btn_only_price or btn_add_weights:
-        base_price = ss.global_base_price
-        if base_price == 0:
-            st.error("🚨 기준가를 입력해주세요!")
-            st.stop()
-
-        ss.history.append(df.copy())
-
-        # v1.2 — 편집한 옵션명과 적용 단가를 사용
-        new_item_name = final_item_name if final_item_name else str(selected_item)
-        new_price = apply_price
-
-        item_rows = df[df[col_item_name] == selected_item].copy()
-
-        sample_b = item_rows[col_weight_name].iloc[0] if len(item_rows) > 0 else "0kg"
-        num_match = re.search(r'(\d+\.?\d*)', str(sample_b))
-        if num_match:
-            prefix = str(sample_b)[:num_match.start()]
-            suffix = str(sample_b)[num_match.end():]
-        else:
-            prefix, suffix = "", "kg"
-
-        sample_e = (item_rows['관리코드'].iloc[0]
-                    if len(item_rows) > 0 and '관리코드' in item_rows.columns else "0kg")
-        num_match_e = re.search(r'(\d+\.?\d*)', str(sample_e))
-        if num_match_e:
-            prefix_e = str(sample_e)[:num_match_e.start()]
-            suffix_e = str(sample_e)[num_match_e.end():]
-        else:
-            prefix_e, suffix_e = "", "kg"
-
-        base_sort_1 = (item_rows['__sort_1'].min() if not item_rows.empty
-                       else df['__sort_1'].max() + 1)
-
-        if '재고수량' in item_rows.columns:
-            item_rows['재고수량'] = pd.to_numeric(item_rows['재고수량'],
-                                              errors='coerce').fillna(0)
-            item_rows = item_rows[item_rows['재고수량'] > 0]
-        else:
-            item_rows['재고수량'] = 1.0
-
-        if not item_rows.empty:
-            item_rows['numeric_weight'] = item_rows[col_weight_name].apply(extract_num)
-            item_rows['옵션가'] = item_rows['numeric_weight'].apply(
-                lambda w: calc_option_price(w, new_price, base_price))
-            item_rows[col_item_name] = new_item_name
-            item_rows['__sort_1'] = base_sort_1
-            item_rows['__sort_2'] = item_rows['numeric_weight']
-
-        new_rows_data = []
-        if btn_add_weights:
-            for w_str in weight_input.strip().split('\n'):
-                w_str = w_str.strip()
-                if not w_str:
-                    continue
-                w_num_match = re.search(r'(\d+\.?\d*)', w_str)
-                if w_num_match:
-                    w_num = float(w_num_match.group(1))
-                    opt_price = calc_option_price(w_num, new_price, base_price)
-                    new_rows_data.append({
-                        col_item_name: new_item_name,
-                        col_weight_name: f"{prefix}{w_num}{suffix}",
-                        "옵션가": opt_price,
-                        "재고수량": 1.0,
-                        "관리코드": f"{prefix_e}{w_num}{suffix_e}",
-                        "사용여부": "Y",
-                        "numeric_weight": w_num,
-                        "__sort_1": base_sort_1,
-                        "__sort_2": w_num,
-                    })
-
-        new_item_df = pd.DataFrame(new_rows_data)
-        combined_df = (pd.concat([item_rows, new_item_df], ignore_index=True)
-                       if not new_item_df.empty else item_rows)
-        if not combined_df.empty:
-            combined_df = combined_df.drop(columns=['numeric_weight'], errors='ignore')
-
-        df_remaining = df[df[col_item_name] != selected_item]
-        final_concat = pd.concat([df_remaining, combined_df], ignore_index=True)
-        final_concat['재고수량'] = pd.to_numeric(final_concat['재고수량'],
-                                             errors='coerce').fillna(0)
-
-        group_cols = [col_item_name, col_weight_name, '옵션가']
-        agg_dict = {'재고수량': 'sum'}
-        for c in final_concat.columns:
-            if c not in group_cols and c != '재고수량':
-                agg_dict[c] = 'first'
-
-        final_concat = final_concat.groupby(group_cols, as_index=False).agg(agg_dict)
-        final_concat = final_concat.sort_values(
-            by=['__sort_1', '__sort_2']).reset_index(drop=True)
-
-        ss.processed_data = final_concat
-        if btn_only_price:
-            st.success(f"✅ '{new_item_name}' 기존 중량들의 단가/기준가가 안전하게 변경되었습니다!")
-        else:
-            st.success(f"✅ '{new_item_name}' 중량 추가 및 단가 일괄 적용이 완료되었습니다!")
-        ss.reset_counter += 1
-        st.rerun()
-
-    st.markdown("---")
-    st.subheader("3. 최종 결과물 확인 및 다운로드")
-
-    # v1.1 — 현재 기준가와 어긋난 행이 남아 있는지 검산
-    mismatch = count_mismatch(ss.processed_data, col_item_name, col_weight_name,
-                              ss.global_base_price, ss.file_format)
+def render_result(slot, ws, base_price):
+    """검산 + 미리보기 + 다운로드 (슬롯별)."""
+    meta = SLOT_META[slot]
+    mismatch = count_mismatch(ws['processed_data'], ws['col_item'], ws['col_weight'],
+                              base_price, ws['file_format'])
     if mismatch:
-        st.warning(f"⚠️ 현재 기준가({ss.global_base_price:,}원) 계산값과 다른 행이 "
-                   f"**{mismatch:,}건** 있습니다. 위의 [🔁 지금 전체 다시 계산]을 "
-                   "누르면 전부 맞춰집니다.")
+        st.warning(f"⚠️ {meta['title']}: 기준가({base_price:,}원)와 어긋난 행 **{mismatch:,}건** — "
+                   "위의 [🔁 전체 다시 계산]을 눌러 주세요.")
     else:
-        st.success(f"✅ 모든 행이 현재 기준가({ss.global_base_price:,}원) 기준으로 "
-                   "정확히 계산되어 있습니다.")
+        st.success(f"✅ {meta['title']}: 모든 행이 기준가({base_price:,}원) 기준으로 정확합니다.")
 
-    display_df = ss.processed_data.drop(columns=['__sort_1', '__sort_2'], errors='ignore')
-    if ss.file_format == 'naver':
-        export_df = internal_to_naver(display_df, col_item_name, col_weight_name)
+    display_df = ws['processed_data'].drop(columns=['__sort_1', '__sort_2'], errors='ignore')
+    if ws['file_format'] == 'naver':
+        export_df = internal_to_naver(display_df, ws['col_item'], ws['col_weight'])
     else:
         export_df = display_df
+    st.dataframe(export_df, use_container_width=True, height=320)
 
-    st.dataframe(export_df, use_container_width=True)
-
-    xls_buffer = io.BytesIO()
     try:
-        wb = xlwt.Workbook(encoding='utf-8')
-        ws = wb.add_sheet('Sheet1')
-        for col_idx, cname in enumerate(export_df.columns.tolist()):
-            ws.write(0, col_idx, str(cname))
-        for row_idx, row in enumerate(export_df.values):
-            for col_idx, val in enumerate(row):
-                if pd.isna(val):
-                    val = ""
-                elif not isinstance(val, (int, float)):
-                    val = str(val)
-                ws.write(row_idx + 1, col_idx, val)
-        wb.save(xls_buffer)
-
-        if not export_df.empty:
-            if ss.file_format == 'naver':
-                prefix_name = "supplementProduct"
-            else:
-                prefix_name = re.sub(r'[\\/*?:"<>|]', "",
-                                     str(export_df[col_item_name].iloc[0]))
-            final_filename = f"{prefix_name}_{datetime.now():%Y%m%d_%H%M%S}.xls"
+        data = build_xls_bytes(export_df)
+        stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
+        if ws['file_format'] == 'naver':
+            fname = f"supplementProduct_{stamp}.xls"
         else:
-            final_filename = "최종수정본_옵션조합.xls"
-
-        st.download_button(f"💾 모든 변경사항 다운로드 ({final_filename})",
-                           xls_buffer.getvalue(), final_filename,
-                           "application/octet-stream")
+            head = re.sub(r'[\\/*?:"<>|]', "", str(export_df[ws['col_item']].iloc[0])) \
+                if not export_df.empty else "옵션조합"
+            fname = f"{head}_{stamp}.xls"
+        st.download_button(f"💾 {meta['icon']} {meta['title']} 다운로드 ({fname})", data, fname,
+                           "application/octet-stream", key=f"dl_{slot}",
+                           use_container_width=True)
     except Exception as e:
-        st.error(f"엑셀 저장 중 오류가 발생했습니다: {e}")
+        st.error(f"엑셀 저장 중 오류: {e}")
+
+
+def run_option():
+    ss = st.session_state
+    ss.setdefault('opt_ws', {'main': new_workspace(), 'supp': new_workspace()})
+    ss.setdefault('global_base_price', 0)
+    ss.setdefault('auto_recalc', True)
+    ss.setdefault('bp_detect_note', '')
+
+    st.title("⚖️ 상품 중량 및 옵션가 자동 생성기")
+    st.caption("메인 상품 파일과 추가상품 파일을 함께 올리면 **같은 기준가**로 두 파일을 한 번에 "
+               "계산·검산합니다. 한 파일만 올려도 됩니다.")
+
+    u1, u2 = st.columns(2)
+    with u1:
+        f_main = st.file_uploader(f"🥩 메인 상품 파일 — {SLOT_META['main']['hint']}",
+                                  type=['xls', 'xlsx', 'csv'], key="opt_file_main")
+    with u2:
+        f_supp = st.file_uploader(f"➕ 추가상품 파일 — {SLOT_META['supp']['hint']}",
+                                  type=['xls', 'xlsx', 'csv'], key="opt_file_supp")
+
+    try:
+        new_main = handle_upload('main', f_main)
+        handle_upload('supp', f_supp)
+    except Exception as e:
+        st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+        st.stop()
+
+    wsm, wss = ss.opt_ws['main'], ss.opt_ws['supp']
+    if f_main is None and wsm['processed_data'] is not None:
+        ss.opt_ws['main'] = wsm = new_workspace()
+    if f_supp is None and wss['processed_data'] is not None:
+        ss.opt_ws['supp'] = wss = new_workspace()
+
+    # 메인 파일을 새로 올리면 기준가 자동 감지 (옵션가 0인 행에서 역산)
+    if new_main:
+        bp, why = detect_base_price(wsm['processed_data'], wsm['col_item'], wsm['col_weight'],
+                                    wsm['file_format'])
+        if 'global_base_price_input' in ss:
+            del ss['global_base_price_input']
+        if bp:
+            ss.global_base_price = bp
+            ss.bp_detect_note = f"메인 파일에서 자동 감지 — '{why}' 행의 옵션가가 0 → 기준가 {bp:,}원"
+        else:
+            ss.global_base_price = 0
+            ss.bp_detect_note = ""
+        st.rerun()
+
+    active = [s for s in ('main', 'supp') if ss.opt_ws[s]['processed_data'] is not None]
+    if not active:
+        st.info("👆 파일을 업로드하면 작업을 시작할 수 있습니다. 살치살처럼 추가상품을 함께 파는 "
+                "상품은 **두 파일을 모두** 올리세요.")
+        return
+
+    # ── 기준가 (두 파일 공통) ──────────────────────────────
+    st.markdown("---")
+    st.subheader("⚡ 기준가 (메인 상품 1개 가격 · 두 파일 공통)")
+    c1, c2 = st.columns([2, 3])
+    with c1:
+        base_price = st.number_input("기준가(원)", min_value=0, value=ss.global_base_price,
+                                     step=500, key="global_base_price_input")
+    ss.global_base_price = base_price
+    with c2:
+        if base_price > 0:
+            st.success(f"✅ 기준가 **{base_price:,}원** — 메인·추가상품 모두 "
+                       "`중량 × kg단가 − 기준가` 로 계산합니다.")
+            if ss.bp_detect_note:
+                st.caption("📌 " + ss.bp_detect_note)
+        else:
+            st.warning("⚠️ 기준가를 입력해야 이후 작업이 열립니다. (예: 살치살 1kg 48,000원이면 48000)")
+        ss.auto_recalc = st.checkbox("기준가를 바꾸면 올라온 파일 **전체**를 자동으로 다시 계산",
+                                     value=ss.auto_recalc)
+    if base_price == 0:
+        return
+
+    rc = st.columns(len(active))
+    for col, slot in zip(rc, active):
+        with col:
+            render_recalc(slot, ss.opt_ws[slot], base_price, ss.auto_recalc)
+
+    # ── 파일별 작업 탭 ─────────────────────────────────────
+    st.markdown("---")
+    tab_labels = [f"{SLOT_META[s]['icon']} {SLOT_META[s]['title']}" for s in active]
+    for tab, slot in zip(st.tabs(tab_labels), active):
+        with tab:
+            render_item_editor(slot, ss.opt_ws[slot], base_price)
+
+    # ── 결과 / 다운로드 ────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📦 최종 결과 확인 및 다운로드")
+    total_bad = sum(count_mismatch(ss.opt_ws[s]['processed_data'], ss.opt_ws[s]['col_item'],
+                                   ss.opt_ws[s]['col_weight'], base_price,
+                                   ss.opt_ws[s]['file_format']) for s in active)
+    if len(active) == 2:
+        if total_bad == 0:
+            st.success("✅ 메인 상품과 추가상품이 **같은 기준가**로 모두 맞게 계산되어 있습니다. "
+                       "두 파일을 받아 네이버에 올리시면 됩니다.")
+        else:
+            st.error(f"🚨 두 파일 합쳐 기준가와 어긋난 행이 {total_bad:,}건 있습니다. "
+                     "이 상태로 올리면 추가상품 차액이 틀립니다.")
+    for slot in active:
+        with st.expander(f"{SLOT_META[slot]['icon']} {SLOT_META[slot]['title']} 결과", expanded=True):
+            render_result(slot, ss.opt_ws[slot], base_price)
 
 
 # ═════════════════════════════════════════════════════════════
